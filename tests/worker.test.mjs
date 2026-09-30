@@ -5,7 +5,7 @@ const worker=createWorker({'/index.html':{content:'<h1>Wordloom</h1>',type:'text
 test('Cloudflare reports AI status and returns clear errors without provider calls',async()=>{
   const config=await worker.fetch(new Request('https://wordloom.example/api/config'),{});
   assert.equal(config.status,200);
-  assert.deepEqual(await config.json(),{aiAvailable:false});
+  assert.deepEqual(await config.json(),{aiAvailable:false,accountsAvailable:false});
   assert.equal(config.headers.get('Cache-Control'),'no-store');
   const feedback=await worker.fetch(new Request('https://wordloom.example/api/feedback',{method:'POST'}),{});
   assert.equal(feedback.status,503);
