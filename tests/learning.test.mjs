@@ -1,0 +1,9 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {schedule,isDue,DAY,blankExample,sentenceIncludes,validWord,safeWord} from '../public/learning.js';
+const base={id:'one',word:'nuance',definition:'A subtle distinction.',due:0,interval:0,reviews:0,lapses:0};
+test('missed recall returns in ten minutes and resets long intervals',()=>{const w=schedule({...base,interval:20},'again',100);assert.equal(w.due,600100);assert.equal(w.interval,0);assert.equal(w.lapses,1);});
+test('successful spaced reviews expand intervals while hard stays shorter',()=>{const first=schedule(base,'good',0);assert.equal(first.due,DAY);const second=schedule(first,'good',DAY);assert.equal(second.interval,2);assert.ok(schedule(second,'hard',0).interval<schedule(second,'good',0).interval);assert.equal(schedule(base,'easy',0).interval,3);assert.equal(second.reviews,2);});
+test('due boundary is inclusive',()=>{assert.equal(isDue({...base,due:100},99),false);assert.equal(isDue({...base,due:100},100),true);});
+test('sentence checks use whole words and cloze blanks all occurrences',()=>{assert.equal(sentenceIncludes('A nuanced answer.','nuance'),false);assert.equal(sentenceIncludes('That nuance matters.','nuance'),true);assert.equal(blankExample({...base,example:'Nuance adds nuance.'}),'________ adds ________.');assert.equal(blankExample({...base,example:'An unrelated example.'}),null);});
+test('backup validation rejects invalid entries and sanitizes unexpected fields',()=>{assert.ok(validWord(base));assert.equal(validWord({...base,due:'tomorrow'}),false);assert.equal(validWord({...base,definition:''}),false);const w=safeWord({...base,example:42,interval:-10,source:'<script>',token:'secret'});assert.equal(w.example,'');assert.equal(w.interval,0);assert.equal(w.source,'personal');assert.equal(w.token,undefined);});

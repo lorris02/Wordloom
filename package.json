@@ -1,0 +1,9 @@
+{
+  "name": "wordloom",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "A personal vocabulary garden with active recall and spaced review.",
+  "scripts": { "start": "node server.mjs", "test": "node --test tests/*.test.mjs", "check": "node --check public/app.js && node --check server.mjs" },
+  "engines": { "node": ">=20" }
+}

@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#242d68">
+  <meta name="description" content="Collect new words. Practice in context. Come back at the right time. Wordloom helps you build a vocabulary that stays with you.">
+  <title>Wordloom — make words yours</title>
+  <link rel="icon" href="./icon.svg" type="image/svg+xml"><link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <a href="#today" class="brand" aria-label="Wordloom home"><span class="brand-mark">w</span>wordloom<span class="brand-dot">✳</span></a>
+      <div class="side-caption">A little practice. A bigger vocabulary.</div>
+      <nav aria-label="Main navigation">
+        <button class="nav active" data-view="today"><span>◷</span> Today <span class="nav-count" id="due-count">0</span></button>
+        <button class="nav" data-view="collection"><span>▤</span> My words</button>
+        <button class="nav" data-view="practice"><span>✳</span> Practice studio</button>
+        <button class="nav" data-view="progress"><span>↗</span> My progress</button>
+      </nav>
+      <div class="side-bottom"><div class="small-flower" aria-hidden="true">✳</div><p>Make room for<br>something new.</p><button class="text-button" id="export">Export my words</button><label class="text-button import-label">Import a backup<input type="file" id="import" accept="application/json,.json" hidden></label><p class="storage-note">Saved in this browser.<br>No account needed.</p></div>
+    </aside>
+    <div class="main-wrap">
+      <header class="topbar"><span id="date-label"></span><button class="button primary compact" id="add-top">＋ Add words</button></header>
+      <main id="main" tabindex="-1"></main>
+      <footer>Wordloom <span>One word at a time.</span><a href="https://dictionaryapi.dev/" target="_blank" rel="noreferrer">Dictionary source</a></footer>
+    </div>
+  </div>
+  <dialog id="add-dialog" aria-labelledby="add-title">
+    <form id="add-form"><div class="dialog-heading"><h2 id="add-title">What caught your eye?</h2><button type="button" class="icon-button" id="close-add" aria-label="Close add words">×</button></div><p>Enter a word, or a few separated by commas. We’ll look up their meanings.</p><label for="new-words">Words to learn</label><textarea id="new-words" placeholder="serendipity, articulate, resilient" required maxlength="400" rows="3"></textarea><p class="hint">Up to 10 English words at a time. Words are sent to the dictionary service for lookup.</p><details><summary>Add a word with your own meaning</summary><label for="custom-definition">Your meaning (for a single word)</label><textarea id="custom-definition" rows="2" maxlength="1000" placeholder="A definition in your own words"></textarea><label for="custom-example">Example sentence (optional)</label><input id="custom-example" maxlength="1000" placeholder="Use the word in a sentence"></details><div id="add-status" role="status" aria-live="polite"></div><button class="button primary" id="save-words" type="submit">Add to my words</button></form>
+  </dialog>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
