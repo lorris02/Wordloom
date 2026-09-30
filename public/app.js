@@ -1,5 +1,6 @@
 import { schedule, isDue, stage, normalizeWord, validWord, safeWord, shuffled, sentenceIncludes, blankExample, DAY } from './learning.js';
 import { starterWords } from './starter.js';
+import { setupAccounts } from './account.js';
 const $ = s => document.querySelector(s);
 const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const KEY = 'wordloom-v1';
@@ -10,7 +11,8 @@ let view = ['today','collection','practice','progress'].includes(location.hash.s
 let session=null, aiAvailable=false, filter='', sort='recent';
 const todayKey = t => new Date(t).toLocaleDateString('en-CA');
 const todaysReviews = () => data.history.filter(h=>todayKey(h.at)===todayKey(Date.now())).length;
-function save(){try{localStorage.setItem(KEY,JSON.stringify(data));}catch{storageProblem=true;toast('Browser storage is unavailable. Export your words to keep a backup.');}}
+let account;
+function save(){if(account?.user){account.save(data);return;}try{localStorage.setItem(KEY,JSON.stringify(data));}catch{storageProblem=true;toast('Browser storage is unavailable. Export your words to keep a backup.');}}
 function toast(message){$('#toast').textContent=message;$('#toast').classList.add('visible');clearTimeout(toast.timer);toast.timer=setTimeout(()=>$('#toast').classList.remove('visible'),4000);}
 function source(w){return w.source==='dictionary' ? `<a href="https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(w.word)}" target="_blank" rel="noreferrer">Dictionary definition</a>` : w.source==='starter' ? 'Wordloom starter definition' : 'Your own definition';}
 function pronounce(w){if(!('speechSynthesis' in window)){toast('Pronunciation isn’t supported in this browser.');return;}speechSynthesis.cancel();const u=new SpeechSynthesisUtterance(w.word);u.lang='en-US';u.rate=.85;speechSynthesis.speak(u);}
@@ -140,5 +142,7 @@ $('#import').onchange=async e=>{
 window.addEventListener('hashchange',()=>{const hash=location.hash.slice(1);if(['today','collection','practice','progress'].includes(hash)&&hash!==view){session=null;view=hash;render();}});
 window.addEventListener('storage',e=>{if(e.key===KEY)toast('Your collection changed in another tab. Reload this tab to see the latest words.');});
 render();
+account=setupAccounts({getData:()=>data,loadData:snapshot=>{data=snapshot;storageProblem=false;session=null;render();},loadGuest:()=>{try{const saved=JSON.parse(localStorage.getItem(KEY));data=saved&&Array.isArray(saved.words)&&Array.isArray(saved.history)?saved:{words:structuredClone(starterWords),history:[]};data.words=data.words.filter(validWord).map(safeWord);}catch{data={words:structuredClone(starterWords),history:[]};}session=null;render();},toast});
+void account.initialize();
 fetch('./api/config',{signal:AbortSignal.timeout(3000)}).then(r=>r.ok?r.json():null).then(config=>{aiAvailable=Boolean(config?.aiAvailable);if(session?.mode==='sentence')render();}).catch(()=>{});
 setInterval(()=>{$('#due-count').textContent=data.words.filter(w=>isDue(w)).length;},60000);
