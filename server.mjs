@@ -38,7 +38,7 @@ export function createApp(){return createServer(async(req,res)=>{
     const requested=decodeURIComponent(url.pathname==='/'?'/index.html':url.pathname);
     const file=path.resolve(root,'.'+requested);
     if(!file.startsWith(root+path.sep)&&file!==path.join(root,'index.html')){res.writeHead(403);return res.end('Forbidden');}
-    const content=await readFile(file);res.writeHead(200,{'Content-Type':mime[path.extname(file)]||'application/octet-stream','Cache-Control':'no-cache'});res.end(req.method==='HEAD'?undefined:content);
+    const content=await readFile(requested==='/app.js'?new URL('./.deploy/app.js',import.meta.url):file);res.writeHead(200,{'Content-Type':mime[path.extname(file)]||'application/octet-stream','Cache-Control':'no-cache'});res.end(req.method==='HEAD'?undefined:content);
   }catch{res.writeHead(404,{'Content-Type':'text/plain'});res.end('Not found');}
 });}
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){const port=Number(process.env.PORT)||4173;createApp().listen(port,'127.0.0.1',()=>console.log(`Wordloom is running at http://127.0.0.1:${port}`));}

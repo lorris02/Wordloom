@@ -4,6 +4,9 @@
   "main": ".deploy/worker.mjs",
   "build": {"command": "node scripts/build-worker.mjs"},
   "compatibility_date": "2026-09-30",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": {"APP_ORIGIN":"https://wordloom.ilorijonathan947.workers.dev"},
+  "d1_databases": [{"binding":"DB","database_name":"wordloom-accounts","database_id":"2ea9e8b4-a1aa-494b-84b6-10443f5dcb97","migrations_dir":"cloudflare/migrations"}],
   "workers_dev": true,
   "preview_urls": false,
   "observability": {"enabled": true, "head_sampling_rate": 0.1}
