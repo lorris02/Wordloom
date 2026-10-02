@@ -1,9 +1,14 @@
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
+import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { accountAPI, ApiError } from './cloudflare/accounts.mjs';
+import { MySQLD1 } from './server/mysql.mjs';
 const root = path.resolve(fileURLToPath(new URL('./public/', import.meta.url)));
 const apiKey = process.env.OPENAI_API_KEY;
+const database = process.env.DATABASE_URL && process.env.PASSWORD_PEPPER ? new MySQLD1(process.env.DATABASE_URL,process.env.DATABASE_CA) : null;
+const appOrigin = process.env.APP_ORIGIN;
 const limits = new Map();
 const mime={'.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'text/javascript; charset=utf-8','.svg':'image/svg+xml','.json':'application/json'};
 function json(res,status,value){res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store'});res.end(JSON.stringify(value));}
@@ -12,7 +17,27 @@ export function createApp(){return createServer(async(req,res)=>{
   res.setHeader('Referrer-Policy','strict-origin-when-cross-origin');
   res.setHeader('Content-Security-Policy',"default-src 'self'; connect-src 'self' https://api.dictionaryapi.dev; style-src 'self' 'unsafe-inline'; img-src 'self' data:; script-src 'self'; frame-ancestors 'none'; base-uri 'self'");
   const url=new URL(req.url,'http://localhost');
-  if(url.pathname==='/api/config'&&req.method==='GET')return json(res,200,{aiAvailable:Boolean(apiKey)});
+  if(url.pathname==='/api/config'&&req.method==='GET')return json(res,200,{aiAvailable:Boolean(apiKey),accountsAvailable:Boolean(database&&appOrigin&&process.env.PASSWORD_PEPPER)});
+  if(url.pathname.startsWith('/api/account/')||url.pathname==='/api/collection') {
+    if(!database||!appOrigin||!process.env.PASSWORD_PEPPER)return json(res,503,{error:'Accounts are not configured on this server. You can keep practicing as a guest.'});
+    try {
+      await database.ready;
+      const headers=new Headers();
+      for(const [name,value] of Object.entries(req.headers))if(value!==undefined)headers.set(name,Array.isArray(value)?value.join(', '):value);
+      const forwarded=req.headers['x-forwarded-for'];
+      headers.set('CF-Connecting-IP',typeof forwarded==='string'?forwarded.split(',')[0].trim():(req.socket.remoteAddress||'local'));
+      const init={method:req.method,headers};
+      if(req.method!=='GET'&&req.method!=='HEAD') {init.body=Readable.toWeb(req);init.duplex='half';}
+      const request=new Request(new URL(req.url,appOrigin),init);
+      const response=await accountAPI(request,{DB:database,APP_ORIGIN:appOrigin,PASSWORD_PEPPER:process.env.PASSWORD_PEPPER});
+      res.writeHead(response.status,Object.fromEntries(response.headers));
+      res.end(Buffer.from(await response.arrayBuffer()));
+    } catch(error) {
+      console.error('Account request failed:',error);
+      return json(res,error instanceof ApiError?error.status:503,{error:error instanceof ApiError?error.message:'Account service is temporarily unavailable. Your words on this device are safe. Try again shortly.'});
+    }
+    return;
+  }
   if(url.pathname==='/api/feedback'){
     if(req.method!=='POST')return json(res,405,{error:'Use POST for feedback.'});
     if(!apiKey)return json(res,503,{error:'AI feedback isn’t configured. Use self-review for now.'});
@@ -41,4 +66,4 @@ export function createApp(){return createServer(async(req,res)=>{
     const content=await readFile(requested==='/app.js'?new URL('./.deploy/app.js',import.meta.url):file);res.writeHead(200,{'Content-Type':mime[path.extname(file)]||'application/octet-stream','Cache-Control':'no-cache'});res.end(req.method==='HEAD'?undefined:content);
   }catch{res.writeHead(404,{'Content-Type':'text/plain'});res.end('Not found');}
 });}
-if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){const port=Number(process.env.PORT)||4173;createApp().listen(port,'127.0.0.1',()=>console.log(`Wordloom is running at http://127.0.0.1:${port}`));}
+if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){const port=Number(process.env.PORT)||4173;createApp().listen(port,'0.0.0.0',()=>console.log(`Wordloom is running on port ${port}`));}
