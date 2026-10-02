@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: wordloom
+    runtime: node
+    plan: free
+    buildCommand: npm ci && npm run build
+    startCommand: npm run serve
+    healthCheckPath: /api/config
+    envVars:
+      - key: NODE_VERSION
+        value: 22.13.0
+      - key: APP_ORIGIN
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: DATABASE_CA
+        sync: false
+      - key: PASSWORD_PEPPER
+        generateValue: true
