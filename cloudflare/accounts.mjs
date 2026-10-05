@@ -4,11 +4,27 @@ import {validWord, safeWord} from '../public/learning.js';
 const SESSION = '__Host-wordloom-session';
 const CHALLENGE = '__Host-wordloom-challenge';
 const SESSION_SECONDS = 60 * 60 * 24 * 14;
+const PASSWORD_ITERATIONS = 600_000;
 export class ApiError extends Error { constructor(status, message) { super(message); this.status = status; } }
 export const json = (value, status = 200, extra = {}) => new Response(JSON.stringify(value), {status, headers: {'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff', ...extra}});
 export function encode(bytes) { return btoa(String.fromCharCode(...bytes)).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,''); }
 const decode = value => Uint8Array.from(atob(value.replace(/-/g,'+').replace(/_/g,'/')), c => c.charCodeAt(0));
 const random = () => encode(crypto.getRandomValues(new Uint8Array(32)));
+const randomSalt = () => encode(crypto.getRandomValues(new Uint8Array(16)));
+async function passwordHash(password,salt,pepper) {
+  const key=await crypto.subtle.importKey('raw',new TextEncoder().encode(`${pepper}\0${password}`),'PBKDF2',false,['deriveBits']);
+  const bits=await crypto.subtle.deriveBits({name:'PBKDF2',hash:'SHA-256',salt:decode(salt),iterations:PASSWORD_ITERATIONS},key,256);
+  return encode(new Uint8Array(bits));
+}
+function validPassword(password) { return typeof password==='string'&&password.length>=12&&password.length<=128; }
+function normalizedEmail(value) {
+  if(value===undefined||value===null||value==='')return null;
+  if(typeof value!=='string')throw new ApiError(400,'Enter a valid email address or leave it blank.');
+  const email=value.trim().toLowerCase();
+  if(email.length>254||!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))throw new ApiError(400,'Enter a valid email address or leave it blank.');
+  return email;
+}
+function sameHash(a,b) { if(typeof a!=='string'||typeof b!=='string'||a.length!==b.length)return false;let difference=0;for(let i=0;i<a.length;i++)difference|=a.charCodeAt(i)^b.charCodeAt(i);return difference===0; }
 export async function digest(value) { return encode(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value)))); }
 function cookie(request, name) { return request.headers.get('Cookie')?.split(';').map(c=>c.trim()).find(c=>c.startsWith(name+'='))?.slice(name.length+1) || ''; }
 const setCookie = (name, value, seconds) => `${name}=${value}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${seconds}`;
@@ -68,7 +84,7 @@ async function checkedVerification(call) { try { const result=await call(); if(!
 
 export async function accountAPI(request, env) {
   const path=new URL(request.url).pathname;
-  const methods={'/api/account/me':'GET','/api/account/register/options':'POST','/api/account/register/verify':'POST','/api/account/login/options':'POST','/api/account/login/verify':'POST','/api/account/recover':'POST','/api/account/logout':'POST','/api/account/passkey/options':'POST','/api/account/passkey/verify':'POST','/api/account/recovery':'POST','/api/collection':'GET, PUT'};
+  const methods={'/api/account/me':'GET','/api/account/password/register':'POST','/api/account/password/login':'POST','/api/account/register/options':'POST','/api/account/register/verify':'POST','/api/account/login/options':'POST','/api/account/login/verify':'POST','/api/account/recover':'POST','/api/account/logout':'POST','/api/account/passkey/options':'POST','/api/account/passkey/verify':'POST','/api/account/recovery':'POST','/api/collection':'GET, PUT'};
   if(!methods[path])return json({error:'API route not found.'},404);
   if(!methods[path].split(', ').includes(request.method))return json({error:'Method not allowed.'},405,{Allow:methods[path]});
   const db=env.DB;
@@ -99,6 +115,30 @@ export async function accountAPI(request, env) {
   }
   await limit(db,'auth:'+ip,40,600000);
   const body=await readJSON(request);
+  if(path==='/api/account/password/register') {
+    const username=typeof body.username==='string'?body.username.trim().toLowerCase():'';
+    const name=typeof body.name==='string'?body.name.trim():'';
+    const email=normalizedEmail(body.email);
+    if(!/^[a-z0-9_]{3,24}$/.test(username)||name.length<1||name.length>50)throw new ApiError(400,'Use a name up to 50 characters and a username with 3–24 letters, numbers, or underscores.');
+    if(!validPassword(body.password))throw new ApiError(400,'Use a password between 12 and 128 characters.');
+    if(await db.prepare('SELECT id FROM users WHERE username=? OR (? IS NOT NULL AND email=?)').bind(username,email,email).first())throw new ApiError(409,'That username or email is already registered.');
+    const user={id:crypto.randomUUID(),username,display_name:name},salt=randomSalt(),recoveryCode=random(),fresh=await newSession(db,user);
+    try {await db.batch([
+      db.prepare('INSERT INTO users(id,username,display_name,recovery_hash,created_at,email,password_salt,password_hash) VALUES(?,?,?,?,?,?,?,?)').bind(user.id,username,name,await digest(recoveryCode),Date.now(),email,salt,await passwordHash(body.password,salt,env.PASSWORD_PEPPER||'')),
+      db.prepare('INSERT INTO collections(user_id,updated_at) VALUES(?,?)').bind(user.id,Date.now()),fresh.statement,
+    ]);}catch(error){if(String(error.message).includes('UNIQUE'))throw new ApiError(409,'That username or email is already registered.');throw error;}
+    return json({user:publicUser(user),recoveryCode},200,{'Set-Cookie':setCookie(SESSION,fresh.token,SESSION_SECONDS)});
+  }
+  if(path==='/api/account/password/login') {
+    const identifier=typeof body.identifier==='string'?body.identifier.trim().toLowerCase():'';
+    if(identifier.length>254||!validPassword(body.password))throw new ApiError(401,'Username/email or password is incorrect.');
+    await limit(db,'password:'+await digest(identifier),10,900000);
+    const user=await db.prepare('SELECT * FROM users WHERE username=? OR email=?').bind(identifier,identifier).first();
+    const salt=user?.password_salt||randomSalt(),actual=await passwordHash(body.password,salt,env.PASSWORD_PEPPER||'');
+    if(!user?.password_hash||!sameHash(actual,user.password_hash))throw new ApiError(401,'Username/email or password is incorrect.');
+    const fresh=await newSession(db,user);await db.prepare('INSERT INTO sessions(token_hash,user_id,expires_at) VALUES(?,?,?)').bind(await digest(fresh.token),user.id,Date.now()+SESSION_SECONDS*1000).run();
+    return json({user:publicUser(user)},200,{'Set-Cookie':setCookie(SESSION,fresh.token,SESSION_SECONDS)});
+  }
   if(path==='/api/account/register/options'||path==='/api/account/passkey/options') {
     let user,ceremony='register',excludeCredentials=[];
     if(path.includes('/passkey/')) {

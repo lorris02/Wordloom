@@ -9,12 +9,23 @@ import {starterWords} from '../public/starter.js';
 
 const origin='https://wordloom.example',rpID='wordloom.example';
 function database(){
-  const sqlite=new DatabaseSync(':memory:');sqlite.exec(readFileSync(new URL('../cloudflare/migrations/0001_accounts.sql',import.meta.url),'utf8'));
+  const sqlite=new DatabaseSync(':memory:');for(const file of ['0001_accounts.sql','0002_password_accounts.sql'])sqlite.exec(readFileSync(new URL('../cloudflare/migrations/'+file,import.meta.url),'utf8'));
   const db={prepare(sql){const statement=sqlite.prepare(sql);let args=[];return {bind(...values){args=values;return this;},async first(){return statement.get(...args)||null;},async all(){return {results:statement.all(...args)};},async run(){return {meta:statement.run(...args)};}};},async batch(statements){sqlite.exec('BEGIN');try{const results=[];for(const statement of statements)results.push(await statement.run());sqlite.exec('COMMIT');return results;}catch(error){sqlite.exec('ROLLBACK');throw error;}}};
   return {db,sqlite};
 }
-function fixture(t){const {db,sqlite}=database();t.after(()=>sqlite.close());const worker=createWorker({}),jar=new Map();return {db,sqlite,jar,async call(path,body,method=body===undefined?'GET':'POST',extra={}){const headers={'Origin':origin,'CF-Connecting-IP':'192.0.2.1','Cookie':[...jar].map(([k,v])=>k+'='+v).join('; '),...extra};if(body!==undefined)headers['Content-Type']='application/json';const response=await worker.fetch(new Request(origin+'/api/'+path,{method,headers,body:body===undefined?undefined:JSON.stringify(body)}),{DB:db,APP_ORIGIN:origin});for(const cookie of response.headers.getSetCookie()){const [k,v]=cookie.split(';')[0].split('=');if(v)jar.set(k,v);else jar.delete(k);}return {response,value:await response.json()};}};}
+function fixture(t){const {db,sqlite}=database();t.after(()=>sqlite.close());const worker=createWorker({}),jar=new Map();return {db,sqlite,jar,async call(path,body,method=body===undefined?'GET':'POST',extra={}){const headers={'Origin':origin,'CF-Connecting-IP':'192.0.2.1','Cookie':[...jar].map(([k,v])=>k+'='+v).join('; '),...extra};if(body!==undefined)headers['Content-Type']='application/json';const response=await worker.fetch(new Request(origin+'/api/'+path,{method,headers,body:body===undefined?undefined:JSON.stringify(body)}),{DB:db,APP_ORIGIN:origin,PASSWORD_PEPPER:'test-only-pepper'});for(const cookie of response.headers.getSetCookie()){const [k,v]=cookie.split(';')[0].split('=');if(v)jar.set(k,v);else jar.delete(k);}return {response,value:await response.json()};}};}
 const b64=value=>Buffer.from(value).toString('base64url');
+test('username/password registration and username or email sign-in',async t=>{
+  const f=fixture(t),created=await f.call('account/password/register',{username:'wordfan',name:'Word Fan',email:'  WORD@EXAMPLE.COM ',password:'long secure test phrase'});
+  assert.equal(created.response.status,200,JSON.stringify(created.value));assert.equal(created.value.user.username,'wordfan');assert.equal(created.value.recoveryCode.length,43);
+  const row=f.sqlite.prepare('SELECT email,password_salt,password_hash,recovery_hash FROM users').get();assert.equal(row.email,'word@example.com');assert.notEqual(row.password_hash,'long secure test phrase');assert.equal(row.password_salt.length,22);
+  await f.call('account/logout',{});
+  assert.equal((await f.call('account/password/login',{identifier:'WORD@EXAMPLE.COM',password:'long secure test phrase'})).response.status,200);
+  await f.call('account/logout',{});
+  assert.equal((await f.call('account/password/login',{identifier:'wordfan',password:'wrong password here'})).response.status,401);
+  assert.equal((await f.call('account/password/register',{username:'wordfan',name:'Other',password:'another secure phrase'})).response.status,409);
+  assert.equal((await f.call('account/password/register',{username:'short',name:'Short',password:'tiny'})).response.status,400);
+});
 function authenticator(){
   const {publicKey,privateKey}=generateKeyPairSync('ec',{namedCurve:'prime256v1'}),jwk=publicKey.export({format:'jwk'}),id=randomBytes(32),hash=createHash('sha256').update(rpID).digest();
   const cose=isoCBOR.encode(new Map([[1,2],[3,-7],[-1,1],[-2,new Uint8Array(Buffer.from(jwk.x,'base64url'))],[-3,new Uint8Array(Buffer.from(jwk.y,'base64url'))]]));
