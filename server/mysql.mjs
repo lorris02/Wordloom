@@ -39,6 +39,9 @@ export class MySQLD1 {
     if(/^UPDATE users SET recovery_hash=\? WHERE id=\? AND recovery_hash=\? RETURNING id/i.test(sql)) {
       return this.transaction(async conn=>{const [rows]=await conn.execute('SELECT id FROM users WHERE id=? AND recovery_hash=? FOR UPDATE',[values[1],values[2]]);if(!rows[0])return null;await conn.execute('UPDATE users SET recovery_hash=? WHERE id=? AND recovery_hash=?',values);return rows[0];});
     }
+    if(/^DELETE FROM password_resets WHERE token_hash=\? AND expires_at>\? RETURNING user_id/i.test(sql)) {
+      return this.transaction(async conn=>{const [rows]=await conn.execute('SELECT user_id FROM password_resets WHERE token_hash=? AND expires_at>? FOR UPDATE',values);if(!rows[0])return null;await conn.execute('DELETE FROM password_resets WHERE token_hash=?',[values[0]]);return rows[0];});
+    }
     const upsert=/^INSERT INTO rate_limits\(bucket,attempts,reset_at\) VALUES\(\?,1,\?\) ON CONFLICT\(bucket\) DO UPDATE SET attempts=CASE WHEN reset_at<=\? THEN 1 ELSE attempts\+1 END, reset_at=CASE WHEN reset_at<=\? THEN excluded\.reset_at ELSE reset_at END RETURNING attempts,reset_at/i.test(sql);
     if(upsert) {
       try {await this.query('INSERT INTO rate_limits(bucket,attempts,reset_at) VALUES(?,1,?) ON DUPLICATE KEY UPDATE attempts=IF(reset_at<=?,1,attempts+1),reset_at=IF(reset_at<=?,VALUES(reset_at),reset_at)',values);const [rows]=await this.query('SELECT attempts,reset_at FROM rate_limits WHERE bucket=?',[values[0]]);return rows[0]||null;}catch(error){normalizeError(error);}
@@ -62,15 +65,22 @@ export class MySQLD1 {
   }
   async initialize() {
     const schema=[
-      `CREATE TABLE IF NOT EXISTS users (id CHAR(36) PRIMARY KEY, username VARCHAR(64) NOT NULL UNIQUE, display_name VARCHAR(100) NOT NULL, recovery_hash CHAR(43) NOT NULL, created_at BIGINT NOT NULL, email VARCHAR(254) NULL UNIQUE, password_salt VARCHAR(32), password_hash VARCHAR(43)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+      `CREATE TABLE IF NOT EXISTS users (id CHAR(36) PRIMARY KEY, username VARCHAR(64) NOT NULL UNIQUE, display_name VARCHAR(100) NOT NULL, recovery_hash CHAR(43) NOT NULL, created_at BIGINT NOT NULL, email VARCHAR(254) NULL UNIQUE, phone VARCHAR(16) NULL UNIQUE, password_salt VARCHAR(32), password_hash VARCHAR(43)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
       `CREATE TABLE IF NOT EXISTS credentials (id VARCHAR(512) PRIMARY KEY, user_id CHAR(36) NOT NULL, public_key TEXT NOT NULL, counter BIGINT NOT NULL DEFAULT 0, transports TEXT NOT NULL, INDEX credentials_user(user_id), CONSTRAINT credentials_user_fk FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
       `CREATE TABLE IF NOT EXISTS sessions (token_hash CHAR(43) PRIMARY KEY, user_id CHAR(36) NOT NULL, expires_at BIGINT NOT NULL, INDEX sessions_expiry(expires_at), CONSTRAINT sessions_user_fk FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
-      `CREATE TABLE IF NOT EXISTS challenges (token_hash CHAR(43) PRIMARY KEY, challenge VARCHAR(512) NOT NULL, ceremony VARCHAR(32) NOT NULL, user_id CHAR(36), username VARCHAR(64), display_name VARCHAR(100), expires_at BIGINT NOT NULL, email VARCHAR(254), INDEX challenges_expiry(expires_at)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+      `CREATE TABLE IF NOT EXISTS challenges (token_hash CHAR(43) PRIMARY KEY, challenge VARCHAR(512) NOT NULL, ceremony VARCHAR(32) NOT NULL, user_id CHAR(36), username VARCHAR(64), display_name VARCHAR(100), expires_at BIGINT NOT NULL, email VARCHAR(254), phone VARCHAR(16), INDEX challenges_expiry(expires_at)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+      `CREATE TABLE IF NOT EXISTS password_resets (token_hash CHAR(43) PRIMARY KEY, user_id CHAR(36) NOT NULL, expires_at BIGINT NOT NULL, INDEX password_resets_expiry(expires_at), CONSTRAINT password_resets_user_fk FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
       `CREATE TABLE IF NOT EXISTS collections (user_id CHAR(36) PRIMARY KEY, data LONGTEXT NOT NULL, revision INT NOT NULL DEFAULT 0, updated_at BIGINT NOT NULL, CONSTRAINT collections_user_fk FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
       `CREATE TABLE IF NOT EXISTS rate_limits (bucket VARCHAR(255) PRIMARY KEY, attempts INT NOT NULL, reset_at BIGINT NOT NULL, INDEX rate_limits_expiry(reset_at)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
     ];
     const conn=await this.pool.getConnection();
-    try {for(const sql of schema)await conn.query(sql);}finally{conn.release();}
+    try {
+      for(const sql of schema)await conn.query(sql);
+      for(const [table,column,definition] of [['users','phone','VARCHAR(16) NULL UNIQUE'],['challenges','email','VARCHAR(254)'],['challenges','phone','VARCHAR(16)']]) {
+        const [rows]=await conn.query(`SHOW COLUMNS FROM ${table} LIKE ?`,[column]);
+        if(!rows.length)await conn.query(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+      }
+    }finally{conn.release();}
   }
   async close() {await this.pool.end();}
 }

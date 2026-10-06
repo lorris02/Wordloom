@@ -29,7 +29,7 @@ export function createApp(){return createServer(async(req,res)=>{
       const init={method:req.method,headers};
       if(req.method!=='GET'&&req.method!=='HEAD') {init.body=Readable.toWeb(req);init.duplex='half';}
       const request=new Request(new URL(req.url,appOrigin),init);
-      const response=await accountAPI(request,{DB:database,APP_ORIGIN:appOrigin,PASSWORD_PEPPER:process.env.PASSWORD_PEPPER});
+      const response=await accountAPI(request,{DB:database,APP_ORIGIN:appOrigin,PASSWORD_PEPPER:process.env.PASSWORD_PEPPER,RESEND_API_KEY:process.env.RESEND_API_KEY,EMAIL_FROM:process.env.EMAIL_FROM,TWILIO_ACCOUNT_SID:process.env.TWILIO_ACCOUNT_SID,TWILIO_AUTH_TOKEN:process.env.TWILIO_AUTH_TOKEN,TWILIO_FROM_NUMBER:process.env.TWILIO_FROM_NUMBER});
       res.writeHead(response.status,Object.fromEntries(response.headers));
       res.end(Buffer.from(await response.arrayBuffer()));
     } catch(error) {
