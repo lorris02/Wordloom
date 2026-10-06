@@ -24,11 +24,28 @@ function normalizedEmail(value) {
   if(email.length>254||!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))throw new ApiError(400,'Enter a valid email address or leave it blank.');
   return email;
 }
+function normalizedPhone(value) {
+  if(value===undefined||value===null||value==='')return null;
+  if(typeof value!=='string'||!/^\+[1-9]\d{7,14}$/.test(value.trim()))throw new ApiError(400,'Use a phone number with country code, like +14155550123.');
+  return value.trim();
+}
+async function sendReset(env,contact,link,isPhone) {
+  let response;
+  if(isPhone) {
+    if(!env.TWILIO_ACCOUNT_SID||!env.TWILIO_AUTH_TOKEN||!env.TWILIO_FROM_NUMBER)throw new ApiError(503,'Text password resets are not set up yet.');
+    const body=new URLSearchParams({To:contact,From:env.TWILIO_FROM_NUMBER,Body:`Reset your Wordloom password: ${link} This link expires in 30 minutes.`});
+    response=await fetch(`https://api.twilio.com/2010-04-01/Accounts/${env.TWILIO_ACCOUNT_SID}/Messages.json`,{method:'POST',headers:{Authorization:`Basic ${btoa(`${env.TWILIO_ACCOUNT_SID}:${env.TWILIO_AUTH_TOKEN}`)}`,'Content-Type':'application/x-www-form-urlencoded'},body,signal:AbortSignal.timeout(12000)});
+  } else {
+    if(!env.RESEND_API_KEY||!env.EMAIL_FROM)throw new ApiError(503,'Email password resets are not set up yet.');
+    response=await fetch('https://api.resend.com/emails',{method:'POST',headers:{Authorization:`Bearer ${env.RESEND_API_KEY}`,'Content-Type':'application/json'},body:JSON.stringify({from:env.EMAIL_FROM,to:[contact],subject:'Reset your Wordloom password',text:`Use this one-time link to reset your password: ${link}\n\nIt expires in 30 minutes. If you did not request this, ignore this email.`}),signal:AbortSignal.timeout(12000)});
+  }
+  if(!response.ok)throw new ApiError(502,'We could not send the reset message. Check the address and try again.');
+}
 function sameHash(a,b) { if(typeof a!=='string'||typeof b!=='string'||a.length!==b.length)return false;let difference=0;for(let i=0;i<a.length;i++)difference|=a.charCodeAt(i)^b.charCodeAt(i);return difference===0; }
 export async function digest(value) { return encode(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value)))); }
 function cookie(request, name) { return request.headers.get('Cookie')?.split(';').map(c=>c.trim()).find(c=>c.startsWith(name+'='))?.slice(name.length+1) || ''; }
 const setCookie = (name, value, seconds) => `${name}=${value}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${seconds}`;
-const publicUser = row => ({id:row.id, username:row.username, name:row.display_name});
+const publicUser = row => ({id:row.id, username:row.username, name:row.display_name, email:row.email||null, phone:row.phone||null});
 
 export async function readJSON(request, max = 262144) {
   if (!request.headers.get('Content-Type')?.toLowerCase().startsWith('application/json')) throw new ApiError(415,'Send JSON.');
@@ -71,7 +88,7 @@ async function challengeResponse(db,options,ceremony,user={}) {
     db.prepare('DELETE FROM challenges WHERE token_hash IN (SELECT token_hash FROM challenges WHERE expires_at<=? LIMIT 100)').bind(now),
     db.prepare('DELETE FROM sessions WHERE token_hash IN (SELECT token_hash FROM sessions WHERE expires_at<=? LIMIT 100)').bind(now),
     db.prepare('DELETE FROM rate_limits WHERE bucket IN (SELECT bucket FROM rate_limits WHERE reset_at<=? LIMIT 100)').bind(now),
-    db.prepare('INSERT INTO challenges(token_hash,challenge,ceremony,user_id,username,display_name,expires_at) VALUES(?,?,?,?,?,?,?)').bind(await digest(token),options.challenge,ceremony,user.id||null,user.username||null,user.display_name||null,now+300000),
+    db.prepare('INSERT INTO challenges(token_hash,challenge,ceremony,user_id,username,display_name,expires_at,email,phone) VALUES(?,?,?,?,?,?,?,?,?)').bind(await digest(token),options.challenge,ceremony,user.id||null,user.username||null,user.display_name||null,now+300000,user.email||null,user.phone||null),
   ]);
   return json({options},200,{'Set-Cookie':setCookie(CHALLENGE,token,300)});
 }
@@ -84,7 +101,7 @@ async function checkedVerification(call) { try { const result=await call(); if(!
 
 export async function accountAPI(request, env) {
   const path=new URL(request.url).pathname;
-  const methods={'/api/account/me':'GET','/api/account/password/register':'POST','/api/account/password/login':'POST','/api/account/register/options':'POST','/api/account/register/verify':'POST','/api/account/login/options':'POST','/api/account/login/verify':'POST','/api/account/recover':'POST','/api/account/logout':'POST','/api/account/passkey/options':'POST','/api/account/passkey/verify':'POST','/api/account/recovery':'POST','/api/collection':'GET, PUT'};
+  const methods={'/api/account/me':'GET','/api/account/password/register':'POST','/api/account/password/login':'POST','/api/account/password-reset/request':'POST','/api/account/password-reset/complete':'POST','/api/account/contact':'POST','/api/account/register/options':'POST','/api/account/register/verify':'POST','/api/account/login/options':'POST','/api/account/login/verify':'POST','/api/account/logout':'POST','/api/account/passkey/options':'POST','/api/account/passkey/verify':'POST','/api/collection':'GET, PUT'};
   if(!methods[path])return json({error:'API route not found.'},404);
   if(!methods[path].split(', ').includes(request.method))return json({error:'Method not allowed.'},405,{Allow:methods[path]});
   const db=env.DB;
@@ -115,29 +132,65 @@ export async function accountAPI(request, env) {
   }
   await limit(db,'auth:'+ip,40,600000);
   const body=await readJSON(request);
+  if(path==='/api/account/contact') {
+    const account=await requireUser(request,db),email=normalizedEmail(body.email),phone=normalizedPhone(body.phone);
+    if(!email&&!phone)throw new ApiError(400,'Add an email address or phone number.');
+    if(await db.prepare('SELECT id FROM users WHERE id<>? AND ((? IS NOT NULL AND email=?) OR (? IS NOT NULL AND phone=?))').bind(account.id,email,email,phone,phone).first())throw new ApiError(409,'That email or phone number is already linked to another account.');
+    try{await db.prepare('UPDATE users SET email=?,phone=? WHERE id=?').bind(email,phone,account.id).run();}catch(error){if(String(error.message).includes('UNIQUE'))throw new ApiError(409,'That email or phone number is already linked to another account.');throw error;}
+    return json({user:publicUser({...account,email,phone})});
+  }
   if(path==='/api/account/password/register') {
     const username=typeof body.username==='string'?body.username.trim().toLowerCase():'';
     const name=typeof body.name==='string'?body.name.trim():'';
-    const email=normalizedEmail(body.email);
+    const email=normalizedEmail(body.email),phone=normalizedPhone(body.phone);
+    if(!email&&!phone)throw new ApiError(400,'Add an email address or phone number so you can reset your password.');
     if(!/^[a-z0-9_]{3,24}$/.test(username)||name.length<1||name.length>50)throw new ApiError(400,'Use a name up to 50 characters and a username with 3–24 letters, numbers, or underscores.');
     if(!validPassword(body.password))throw new ApiError(400,'Use a password between 12 and 128 characters.');
-    if(await db.prepare('SELECT id FROM users WHERE username=? OR (? IS NOT NULL AND email=?)').bind(username,email,email).first())throw new ApiError(409,'That username or email is already registered.');
-    const user={id:crypto.randomUUID(),username,display_name:name},salt=randomSalt(),recoveryCode=random(),fresh=await newSession(db,user);
+    if(await db.prepare('SELECT id FROM users WHERE username=? OR (? IS NOT NULL AND email=?) OR (? IS NOT NULL AND phone=?)').bind(username,email,email,phone,phone).first())throw new ApiError(409,'That username or contact is already registered.');
+    const user={id:crypto.randomUUID(),username,display_name:name,email,phone},salt=randomSalt(),fresh=await newSession(db,user);
     try {await db.batch([
-      db.prepare('INSERT INTO users(id,username,display_name,recovery_hash,created_at,email,password_salt,password_hash) VALUES(?,?,?,?,?,?,?,?)').bind(user.id,username,name,await digest(recoveryCode),Date.now(),email,salt,await passwordHash(body.password,salt,env.PASSWORD_PEPPER||'')),
+      db.prepare('INSERT INTO users(id,username,display_name,recovery_hash,created_at,email,phone,password_salt,password_hash) VALUES(?,?,?,?,?,?,?,?,?)').bind(user.id,username,name,await digest(random()),Date.now(),email,phone,salt,await passwordHash(body.password,salt,env.PASSWORD_PEPPER||'')),
       db.prepare('INSERT INTO collections(user_id,updated_at) VALUES(?,?)').bind(user.id,Date.now()),fresh.statement,
     ]);}catch(error){if(String(error.message).includes('UNIQUE'))throw new ApiError(409,'That username or email is already registered.');throw error;}
-    return json({user:publicUser(user),recoveryCode},200,{'Set-Cookie':setCookie(SESSION,fresh.token,SESSION_SECONDS)});
+    return json({user:publicUser(user)},200,{'Set-Cookie':setCookie(SESSION,fresh.token,SESSION_SECONDS)});
   }
   if(path==='/api/account/password/login') {
-    const identifier=typeof body.identifier==='string'?body.identifier.trim().toLowerCase():'';
+    const rawIdentifier=typeof body.identifier==='string'?body.identifier.trim():'';
+    const identifier=rawIdentifier.startsWith('+')?rawIdentifier.replace(/[\s()-]/g,''):rawIdentifier.toLowerCase();
     if(identifier.length>254||!validPassword(body.password))throw new ApiError(401,'Username/email or password is incorrect.');
     await limit(db,'password:'+await digest(identifier),10,900000);
-    const user=await db.prepare('SELECT * FROM users WHERE username=? OR email=?').bind(identifier,identifier).first();
+    const user=await db.prepare('SELECT * FROM users WHERE username=? OR email=? OR phone=?').bind(identifier,identifier,identifier).first();
     const salt=user?.password_salt||randomSalt(),actual=await passwordHash(body.password,salt,env.PASSWORD_PEPPER||'');
     if(!user?.password_hash||!sameHash(actual,user.password_hash))throw new ApiError(401,'Username/email or password is incorrect.');
     const fresh=await newSession(db,user);await db.prepare('INSERT INTO sessions(token_hash,user_id,expires_at) VALUES(?,?,?)').bind(await digest(fresh.token),user.id,Date.now()+SESSION_SECONDS*1000).run();
     return json({user:publicUser(user)},200,{'Set-Cookie':setCookie(SESSION,fresh.token,SESSION_SECONDS)});
+  }
+  if(path==='/api/account/password-reset/request') {
+    await limit(db,'reset-ip:'+ip,10,900000);
+    const contact=typeof body.contact==='string'?body.contact.trim():'';
+    const isPhone=contact.startsWith('+');
+    const normalized=isPhone?normalizedPhone(contact):normalizedEmail(contact);
+    if(!normalized)throw new ApiError(400,'Enter the email address or phone number on your account.');
+    await limit(db,'reset-contact:'+await digest(normalized),5,3600000);
+    // Check channel configuration before account lookup so missing setup reveals nothing about accounts.
+    if(isPhone?(!env.TWILIO_ACCOUNT_SID||!env.TWILIO_AUTH_TOKEN||!env.TWILIO_FROM_NUMBER):(!env.RESEND_API_KEY||!env.EMAIL_FROM))throw new ApiError(503,isPhone?'Text password resets are not set up yet.':'Email password resets are not set up yet.');
+    const user=await db.prepare(`SELECT * FROM users WHERE ${isPhone?'phone':'email'}=?`).bind(normalized).first();
+    if(user) {
+      const token=random(),expires=Date.now()+1800000,link=`${origin}/?passwordReset=${token}`;
+      await db.prepare('DELETE FROM password_resets WHERE user_id=?').bind(user.id).run();
+      await db.prepare('INSERT INTO password_resets(token_hash,user_id,expires_at) VALUES(?,?,?)').bind(await digest(token),user.id,expires).run();
+      try {await sendReset(env,normalized,link,isPhone);}catch(error){await db.prepare('DELETE FROM password_resets WHERE user_id=?').bind(user.id).run();throw error;}
+    }
+    return json({ok:true,message:'If an account uses that contact, reset instructions are on the way.'});
+  }
+  if(path==='/api/account/password-reset/complete') {
+    const token=typeof body.token==='string'?body.token:'';
+    if(!/^[A-Za-z0-9_-]{43}$/.test(token)||!validPassword(body.password))throw new ApiError(400,'This reset link is invalid or expired. Request a new one.');
+    const row=await db.prepare('DELETE FROM password_resets WHERE token_hash=? AND expires_at>? RETURNING user_id').bind(await digest(token),Date.now()).first();
+    if(!row)throw new ApiError(400,'This reset link is invalid or expired. Request a new one.');
+    const salt=randomSalt(),hash=await passwordHash(body.password,salt,env.PASSWORD_PEPPER||'');
+    await db.batch([db.prepare('UPDATE users SET password_salt=?,password_hash=? WHERE id=?').bind(salt,hash,row.user_id),db.prepare('DELETE FROM sessions WHERE user_id=?').bind(row.user_id)]);
+    return json({ok:true});
   }
   if(path==='/api/account/register/options'||path==='/api/account/passkey/options') {
     let user,ceremony='register',excludeCredentials=[];
@@ -149,9 +202,11 @@ export async function accountAPI(request, env) {
     } else {
       const username=typeof body.username==='string'?body.username.trim().toLowerCase():'';
       const name=typeof body.name==='string'?body.name.trim():'';
+      const email=normalizedEmail(body.email),phone=normalizedPhone(body.phone);
+      if(!email&&!phone)throw new ApiError(400,'Add an email address or phone number so you can reset your password.');
       if(!/^[a-z0-9_]{3,24}$/.test(username)||name.length<1||name.length>50)throw new ApiError(400,'Use a name up to 50 characters and a username with 3–24 letters, numbers, or underscores.');
-      if(await db.prepare('SELECT id FROM users WHERE username=?').bind(username).first())throw new ApiError(409,'That username is taken. Choose another.');
-      user={id:crypto.randomUUID(),username,display_name:name};
+      if(await db.prepare('SELECT id FROM users WHERE username=? OR (? IS NOT NULL AND email=?) OR (? IS NOT NULL AND phone=?)').bind(username,email,email,phone,phone).first())throw new ApiError(409,'That username or contact is already registered.');
+      user={id:crypto.randomUUID(),username,display_name:name,email,phone};
     }
     const options=await generateRegistrationOptions({rpName:'Wordloom',rpID,userID:new TextEncoder().encode(user.id),userName:user.username,userDisplayName:user.display_name,attestationType:'none',supportedAlgorithmIDs:[-7,-257],authenticatorSelection:{residentKey:'required',userVerification:'required'},excludeCredentials});
     return challengeResponse(db,options,ceremony,user);
@@ -160,48 +215,28 @@ export async function accountAPI(request, env) {
     const adding=path.includes('/passkey/'),challenge=await consumeChallenge(request,db,adding?'passkey':'register');
     if(adding&&(await requireUser(request,db)).id!==challenge.user_id)throw new ApiError(403,'Start again from your account.');
     const {registrationInfo}=await checkedVerification(()=>verifyRegistrationResponse({response:body.credential,expectedChallenge:challenge.challenge,expectedOrigin:origin,expectedRPID:rpID,requireUserVerification:true}));
-    const credential=registrationInfo.credential,user={id:challenge.user_id,username:challenge.username,display_name:challenge.display_name};
-    const statements=[],recoveryCode=adding?null:random();
+    const credential=registrationInfo.credential,user={id:challenge.user_id,username:challenge.username,display_name:challenge.display_name,email:challenge.email,phone:challenge.phone};
+    const statements=[];
     if(!adding) {
-      statements.push(db.prepare('INSERT INTO users(id,username,display_name,recovery_hash,created_at) VALUES(?,?,?,?,?)').bind(user.id,user.username,user.display_name,await digest(recoveryCode),Date.now()));
+      statements.push(db.prepare('INSERT INTO users(id,username,display_name,recovery_hash,created_at,email,phone) VALUES(?,?,?,?,?,?,?)').bind(user.id,user.username,user.display_name,await digest(random()),Date.now(),challenge.email,challenge.phone));
       statements.push(db.prepare('INSERT INTO collections(user_id,updated_at) VALUES(?,?)').bind(user.id,Date.now()));
     }
     statements.push(db.prepare('INSERT INTO credentials(id,user_id,public_key,counter,transports) VALUES(?,?,?,?,?)').bind(credential.id,user.id,encode(credential.publicKey),credential.counter,JSON.stringify(credential.transports||[])));
     if(adding){await db.batch(statements);return json({ok:true});}
     const fresh=await newSession(db,user);statements.push(fresh.statement);
     try {await db.batch(statements);}catch(error){if(String(error.message).includes('UNIQUE'))throw new ApiError(409,'That username or passkey is already registered. Please sign in or choose another username.');throw error;}
-    return json({user:publicUser(user),recoveryCode},200,{'Set-Cookie':setCookie(SESSION,fresh.token,SESSION_SECONDS)});
+    return json({user:publicUser(user)},200,{'Set-Cookie':setCookie(SESSION,fresh.token,SESSION_SECONDS)});
   }
   if(path==='/api/account/login/options')return challengeResponse(db,await generateAuthenticationOptions({rpID,userVerification:'required'}),'login');
   if(path==='/api/account/login/verify') {
     const challenge=await consumeChallenge(request,db,'login');
     if(typeof body.credential?.id!=='string')throw new ApiError(400,'Choose a passkey.');
-    const credential=await db.prepare('SELECT credentials.*,users.username,users.display_name FROM credentials JOIN users ON users.id=credentials.user_id WHERE credentials.id=?').bind(body.credential.id).first();
+    const credential=await db.prepare('SELECT credentials.*,users.username,users.display_name,users.email,users.phone FROM credentials JOIN users ON users.id=credentials.user_id WHERE credentials.id=?').bind(body.credential.id).first();
     if(!credential)throw new ApiError(400,'This passkey is not registered with Wordloom.');
     const {authenticationInfo}=await checkedVerification(()=>verifyAuthenticationResponse({response:body.credential,expectedChallenge:challenge.challenge,expectedOrigin:origin,expectedRPID:rpID,requireUserVerification:true,credential:{id:credential.id,publicKey:decode(credential.public_key),counter:credential.counter,transports:JSON.parse(credential.transports)}}));
     if(body.credential.response?.userHandle!==encode(new TextEncoder().encode(credential.user_id)))throw new ApiError(400,'This passkey does not match the account.');
     const user={...credential,id:credential.user_id},fresh=await newSession(db,user);
     await db.batch([db.prepare('UPDATE credentials SET counter=MAX(counter,?) WHERE id=?').bind(authenticationInfo.newCounter,credential.id),fresh.statement]);
     return json({user:publicUser(user)},200,{'Set-Cookie':setCookie(SESSION,fresh.token,SESSION_SECONDS)});
-  }
-  if(path==='/api/account/recover') {
-    await limit(db,'recover:'+ip,5,900000);
-    const username=typeof body.username==='string'?body.username.trim().toLowerCase():'';
-    const code=typeof body.code==='string'?body.code.trim():'';
-    if(!/^[A-Za-z0-9_-]{43}$/.test(code))throw new ApiError(401,'The username or recovery code is incorrect.');
-    const codeHash=await digest(code);
-    const user=await db.prepare('SELECT * FROM users WHERE username=? AND recovery_hash=?').bind(username,codeHash).first();
-    if(!user)throw new ApiError(401,'The username or recovery code is incorrect.');
-    const recoveryCode=random(),fresh=await newSession(db,user);
-    // Compare-and-swap makes recovery codes single-use even for concurrent requests.
-    const result=await db.prepare('UPDATE users SET recovery_hash=? WHERE id=? AND recovery_hash=? RETURNING id').bind(await digest(recoveryCode),user.id,codeHash).first();
-    if(!result)throw new ApiError(401,'That recovery code has already been used.');
-    await db.batch([db.prepare('DELETE FROM sessions WHERE user_id=?').bind(user.id),fresh.statement]);
-    return json({user:publicUser(user),recoveryCode},200,{'Set-Cookie':setCookie(SESSION,fresh.token,SESSION_SECONDS)});
-  }
-  if(path==='/api/account/recovery') {
-    const user=await requireUser(request,db),recoveryCode=random();
-    await db.prepare('UPDATE users SET recovery_hash=? WHERE id=?').bind(await digest(recoveryCode),user.id).run();
-    return json({recoveryCode});
   }
 }
