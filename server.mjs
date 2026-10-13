@@ -15,7 +15,7 @@ function json(res,status,value){res.writeHead(status,{'Content-Type':'applicatio
 export function createApp(){return createServer(async(req,res)=>{
   res.setHeader('X-Content-Type-Options','nosniff');
   res.setHeader('Referrer-Policy','strict-origin-when-cross-origin');
-  res.setHeader('Content-Security-Policy',"default-src 'self'; connect-src 'self' https://api.dictionaryapi.dev; style-src 'self' 'unsafe-inline'; img-src 'self' data:; script-src 'self'; frame-ancestors 'none'; base-uri 'self'");
+  res.setHeader('Content-Security-Policy',"default-src 'self'; connect-src 'self' https://api.dictionaryapi.dev https://api.datamuse.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; script-src 'self'; frame-ancestors 'none'; base-uri 'self'");
   const url=new URL(req.url,'http://localhost');
   if(url.pathname==='/api/config'&&req.method==='GET')return json(res,200,{aiAvailable:Boolean(apiKey),accountsAvailable:Boolean(database&&appOrigin&&process.env.PASSWORD_PEPPER)});
   if(url.pathname.startsWith('/api/account/')||url.pathname==='/api/collection') {
@@ -67,3 +67,4 @@ export function createApp(){return createServer(async(req,res)=>{
   }catch{res.writeHead(404,{'Content-Type':'text/plain'});res.end('Not found');}
 });}
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){const port=Number(process.env.PORT)||4173;createApp().listen(port,'0.0.0.0',()=>console.log(`Wordloom is running on port ${port}`));}
+

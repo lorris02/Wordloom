@@ -18,7 +18,7 @@
         <button class="nav" data-view="practice"><span>✳</span> Practice studio</button>
         <button class="nav" data-view="progress"><span>↗</span> My progress</button>
       </nav>
-      <div class="side-bottom"><div class="small-flower" aria-hidden="true">✳</div><p>Make room for<br>something new.</p><button class="text-button" id="export">Export my words</button><label class="text-button import-label">Import a backup<input type="file" id="import" accept="application/json,.json" hidden></label><p class="storage-note" id="storage-note">Saved in this browser.<br>No account needed.</p></div>
+      <div class="side-bottom"><div class="small-flower" aria-hidden="true">✳</div><p>Make room for<br>something new.</p><button class="text-button" id="export">Export my words</button><button type="button" class="text-button" id="import-backup">Import a backup</button><input type="file" id="import" accept="application/json,.json" hidden><p class="storage-note" id="storage-note">Saved in this browser.<br>No account needed.</p></div>
     </aside>
     <div class="main-wrap">
       <header class="topbar"><div class="topbar-info"><span id="date-label"></span><span id="sync-status" role="status" aria-live="polite" hidden></span></div><div class="topbar-actions"><button class="button secondary compact" id="account-open">Sign in</button><button class="button primary compact" id="add-top">＋ Add words</button></div></header>
@@ -34,3 +34,4 @@
   <script type="module" src="./app.js"></script>
 </body>
 </html>
+

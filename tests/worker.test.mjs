@@ -15,7 +15,7 @@ test('Cloudflare reports AI status and returns clear errors without provider cal
 test('serves packed assets with security headers and handles HEAD and missing paths',async()=>{
   const home=await worker.fetch(new Request('https://wordloom.example/'));
   assert.equal(await home.text(),'<h1>Wordloom</h1>');
-  assert.match(home.headers.get('Content-Security-Policy'),/frame-ancestors 'none'/);
+  assert.match(home.headers.get('Content-Security-Policy'),/frame-ancestors 'none'/);assert.match(home.headers.get('Content-Security-Policy'),/connect-src 'self' https:\/\/api\.dictionaryapi\.dev https:\/\/api\.datamuse\.com;/);
   const script=await worker.fetch(new Request('https://wordloom.example/app.js'));
   assert.match(script.headers.get('Content-Type'),/javascript/);
   const head=await worker.fetch(new Request('https://wordloom.example/',{method:'HEAD'}));
@@ -23,3 +23,4 @@ test('serves packed assets with security headers and handles HEAD and missing pa
   assert.equal((await worker.fetch(new Request('https://wordloom.example/missing'))).status,404);
   assert.equal((await worker.fetch(new Request('https://wordloom.example/',{method:'POST'}))).status,405);
 });
+

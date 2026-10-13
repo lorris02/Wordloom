@@ -35,7 +35,8 @@ export function createWorker(assets) { return {
       'X-Frame-Options':'DENY',
       'Referrer-Policy':'strict-origin-when-cross-origin',
       'Permissions-Policy':'publickey-credentials-create=(self), publickey-credentials-get=(self)',
-      'Content-Security-Policy':"default-src 'self'; connect-src 'self' https://api.dictionaryapi.dev; style-src 'self' 'unsafe-inline'; img-src 'self' data:; script-src 'self'; frame-ancestors 'none'; base-uri 'self'",
+      'Content-Security-Policy':"default-src 'self'; connect-src 'self' https://api.dictionaryapi.dev https://api.datamuse.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; script-src 'self'; frame-ancestors 'none'; base-uri 'self'",
     }});
   },
 }; }
+
