@@ -1,6 +1,4 @@
 node_modules/
-.deploy/
-.wrangler/
 .env
 .env.*
 !.env.example

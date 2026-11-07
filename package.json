@@ -5,22 +5,16 @@
   "type": "module",
   "description": "A personal vocabulary garden with active recall and spaced review.",
   "scripts": {
-    "prestart": "node scripts/build-worker.mjs",
     "start": "node server.mjs",
     "serve": "node server.mjs",
-    "build": "node scripts/build-worker.mjs",
+    "build": "npm run check",
     "test": "node --test tests/*.test.mjs",
-    "check": "node --check public/app.js && node --check public/account.js && node --check cloudflare/accounts.mjs && node --check server/mysql.mjs && node --check server.mjs"
+    "check": "node --check public/app.js && node --check public/account.js && node --check server/accounts.mjs && node --check server/mysql.mjs && node --check server.mjs"
   },
   "engines": {
     "node": ">=22.13"
   },
   "dependencies": {
-    "@simplewebauthn/browser": "14.0.0",
-    "@simplewebauthn/server": "14.0.3",
     "mysql2": "^3.24.5"
-  },
-  "devDependencies": {
-    "esbuild": "0.28.2"
   }
 }
