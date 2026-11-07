@@ -25,6 +25,7 @@ export async function api(path, body, method = body === undefined ? 'GET' : 'POS
   if (!response.ok) {
     const error = Error(result.error || 'Please try again.');
     error.status = response.status;
+    error.code = result.code;
     throw error;
   }
   return result;
@@ -179,6 +180,8 @@ export function setupAccounts({ getData, loadData, loadGuest, toast }) {
     mode = 'login',
     resetAvailable = false,
     resetToken = new URLSearchParams(location.search).get('passwordReset') || '',
+    confirmToken = new URLSearchParams(location.search).get('confirmEmail') || '',
+    pendingEmail = '',
     busy = false;
   const dialog = $('#account-dialog');
   const cloud = new CloudCollection({
@@ -204,7 +207,9 @@ export function setupAccounts({ getData, loadData, loadGuest, toast }) {
   function draw() {
     let content;
     if (user)
-      content = `<h2>Hi, ${escape(user.name)}.</h2><p>Signed in as <strong>${escape(user.email || user.username)}</strong></p><div class="account-sync">${escape($('#sync-status').textContent)}</div>${cloud.conflict ? '<div class="notice"><p>Another device saved a different version. Export a backup before replacing either version.</p><button class="button secondary" id="use-cloud">Use cloud version</button> <button class="button secondary" id="use-local">Keep this device’s version</button></div>' : ''}<div class="account-actions"><button class="button secondary" id="sync-now">Save now</button><button class="button secondary" id="logout">Sign out</button></div><details><summary>Change email</summary><form id="contact-form"><label for="contact-email">Email</label><input id="contact-email" type="email" autocomplete="email" required value="${escape(user.email || '')}"><button class="button secondary">Save email</button></form></details>`;
+      content = `<h2>Hi, ${escape(user.name)}.</h2><p>Signed in as <strong>${escape(user.email || user.username)}</strong></p><div class="account-sync">${escape($('#sync-status').textContent)}</div>${user.emailConfirmed === false ? `<div class="notice"><p>Confirm <strong>${escape(user.email)}</strong> with the link we sent. Until then, signing in again on other devices won’t work.</p><button class="button secondary" id="resend-confirm">Send the link again</button></div>` : ''}${cloud.conflict ? '<div class="notice"><p>Another device saved a different version. Export a backup before replacing either version.</p><button class="button secondary" id="use-cloud">Use cloud version</button> <button class="button secondary" id="use-local">Keep this device’s version</button></div>' : ''}<div class="account-actions"><button class="button secondary" id="sync-now">Save now</button><button class="button secondary" id="logout">Sign out</button></div><details><summary>Change email</summary><form id="contact-form"><label for="contact-email">Email</label><input id="contact-email" type="email" autocomplete="email" required value="${escape(user.email || '')}"><button class="button secondary">Save email</button></form></details>`;
+    else if (mode === 'check-email')
+      content = `<h2>Check your email.</h2><p>We sent a link to <strong>${escape(pendingEmail)}</strong>. Open it on this device to finish your account. Your words stay here while you wait.</p><button class="button secondary wide" id="resend-confirm">Send the link again</button><p class="account-switch">Confirmed on another device? <button type="button" class="text-button" data-account-mode="login">Sign in</button></p>`;
     else if (mode === 'set-password')
       content = `<h2>Choose a new password.</h2><form id="account-form"><label for="account-password">New password</label><input id="account-password" type="password" autocomplete="new-password" minlength="8" maxlength="128" required><p class="hint">At least 8 characters.</p><button class="button primary wide" type="submit">Update password</button></form>`;
     else if (mode === 'reset-request')
@@ -285,6 +290,13 @@ export function setupAccounts({ getData, loadData, loadGuest, toast }) {
         draw();
       };
     if ($('#account-form')) $('#account-form').onsubmit = authenticate;
+    if ($('#resend-confirm'))
+      $('#resend-confirm').onclick = () =>
+        run(async () => {
+          const result = await api('account/confirm/resend', { email: user?.email || pendingEmail });
+          $('#account-error').className = 'ok';
+          $('#account-error').textContent = result.message;
+        });
     if ($('#contact-form'))
       $('#contact-form').onsubmit = event => {
         event.preventDefault();
@@ -294,7 +306,7 @@ export function setupAccounts({ getData, loadData, loadGuest, toast }) {
           });
           user = result.user;
           draw();
-          toast('Email updated.');
+          toast(user.emailConfirmed ? 'Email updated.' : 'Email updated. Check your inbox to confirm it.');
         });
       };
     if ($('#sync-now'))
@@ -343,6 +355,7 @@ export function setupAccounts({ getData, loadData, loadGuest, toast }) {
     if (busy) return;
     busy = true;
     $('#account-error').textContent = '';
+    $('#account-error').className = '';
     dialog.querySelectorAll('button,input').forEach(el => (el.disabled = true));
     try {
       await action();
@@ -376,6 +389,7 @@ export function setupAccounts({ getData, loadData, loadGuest, toast }) {
         const result = await api('account/password-reset/request', { email: resetEmail });
         $('#account-form').remove();
         $('#back-to-login')?.remove();
+        $('#account-error').className = 'ok';
         $('#account-error').textContent = result.message;
         return;
       }
@@ -385,13 +399,32 @@ export function setupAccounts({ getData, loadData, loadGuest, toast }) {
         history.replaceState({}, '', location.pathname + location.hash);
         mode = 'login';
         draw();
+        $('#account-error').className = 'ok';
         $('#account-error').textContent = 'Password updated. You can sign in now.';
         return;
       }
-      const result =
-        mode === 'create'
-          ? await api('account/password/register', { name, email, password })
-          : await api('account/password/login', { identifier: email, password });
+      let result;
+      try {
+        result =
+          mode === 'create'
+            ? await api('account/password/register', { name, email, password })
+            : await api('account/password/login', { identifier: email, password });
+      } catch (error) {
+        if (error.code !== 'unconfirmed') throw error;
+        pendingEmail = email.trim().toLowerCase();
+        mode = 'check-email';
+        draw();
+        $('#account-error').textContent = error.message;
+        return;
+      }
+      if (result.confirmEmail) {
+        pendingEmail = result.confirmEmail;
+        mode = 'check-email';
+        draw();
+        if (!result.emailSent)
+          $('#account-error').textContent = 'The email did not send. Try “Send the link again” in a minute.';
+        return;
+      }
       await enter(result);
       draw();
       if (!cloud.conflict) dialog.close();
@@ -422,7 +455,20 @@ export function setupAccounts({ getData, loadData, loadGuest, toast }) {
           resetAvailable = Boolean(config.passwordResetAvailable);
         })
         .catch(() => {});
-      if (!resetToken)
+      if (confirmToken) {
+        // Opened from the confirmation email: confirm, sign in, and drop the token from the address.
+        history.replaceState({}, '', location.pathname + location.hash);
+        try {
+          await enter(await api('account/confirm/complete', { token: confirmToken }));
+          toast('Email confirmed. You’re signed in and your words will sync.');
+        } catch (error) {
+          mode = 'login';
+          draw();
+          dialog.showModal();
+          $('#account-error').textContent = error.message;
+        }
+        confirmToken = '';
+      } else if (!resetToken)
         try {
           const result = await api('account/me');
           if (result.user) await enter(result);

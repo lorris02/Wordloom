@@ -89,14 +89,18 @@ export class MySQLD1 {
         return rows[0];
       });
     }
-    if (/^DELETE FROM password_resets WHERE token_hash=\? AND expires_at>\? RETURNING user_id/i.test(sql)) {
+    // MySQL has no DELETE ... RETURNING, so one-time links are read and removed in a transaction.
+    const oneTime = sql.match(
+      /^DELETE FROM (password_resets|email_confirmations) WHERE token_hash=\? AND expires_at>\? RETURNING user_id/i,
+    );
+    if (oneTime) {
       return this.transaction(async conn => {
         const [rows] = await conn.execute(
-          'SELECT user_id FROM password_resets WHERE token_hash=? AND expires_at>? FOR UPDATE',
+          `SELECT user_id FROM ${oneTime[1]} WHERE token_hash=? AND expires_at>? FOR UPDATE`,
           values,
         );
         if (!rows[0]) return null;
-        await conn.execute('DELETE FROM password_resets WHERE token_hash=?', [values[0]]);
+        await conn.execute(`DELETE FROM ${oneTime[1]} WHERE token_hash=?`, [values[0]]);
         return rows[0];
       });
     }
@@ -167,16 +171,21 @@ export class MySQLD1 {
   }
   async initialize() {
     const schema = [
-      `CREATE TABLE IF NOT EXISTS users (id CHAR(36) PRIMARY KEY, username VARCHAR(64) NOT NULL UNIQUE, display_name VARCHAR(100) NOT NULL, recovery_hash CHAR(43) NOT NULL, created_at BIGINT NOT NULL, email VARCHAR(254) NULL UNIQUE, phone VARCHAR(16) NULL UNIQUE, password_salt VARCHAR(32), password_hash VARCHAR(43)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+      `CREATE TABLE IF NOT EXISTS users (id CHAR(36) PRIMARY KEY, username VARCHAR(64) NOT NULL UNIQUE, display_name VARCHAR(100) NOT NULL, recovery_hash CHAR(43) NOT NULL, created_at BIGINT NOT NULL, email VARCHAR(254) NULL UNIQUE, phone VARCHAR(16) NULL UNIQUE, password_salt VARCHAR(32), password_hash VARCHAR(43), email_verified TINYINT NOT NULL DEFAULT 1) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
       `CREATE TABLE IF NOT EXISTS sessions (token_hash CHAR(43) PRIMARY KEY, user_id CHAR(36) NOT NULL, expires_at BIGINT NOT NULL, INDEX sessions_expiry(expires_at), CONSTRAINT sessions_user_fk FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
       `CREATE TABLE IF NOT EXISTS password_resets (token_hash CHAR(43) PRIMARY KEY, user_id CHAR(36) NOT NULL, expires_at BIGINT NOT NULL, INDEX password_resets_expiry(expires_at), CONSTRAINT password_resets_user_fk FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+      `CREATE TABLE IF NOT EXISTS email_confirmations (token_hash CHAR(43) PRIMARY KEY, user_id CHAR(36) NOT NULL, expires_at BIGINT NOT NULL, INDEX email_confirmations_expiry(expires_at), CONSTRAINT email_confirmations_user_fk FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
       `CREATE TABLE IF NOT EXISTS collections (user_id CHAR(36) PRIMARY KEY, data LONGTEXT NOT NULL, revision INT NOT NULL DEFAULT 0, updated_at BIGINT NOT NULL, CONSTRAINT collections_user_fk FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
       `CREATE TABLE IF NOT EXISTS rate_limits (bucket VARCHAR(255) PRIMARY KEY, attempts INT NOT NULL, reset_at BIGINT NOT NULL, INDEX rate_limits_expiry(reset_at)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
     ];
     const conn = await this.pool.getConnection();
     try {
       for (const sql of schema) await conn.query(sql);
-      for (const [table, column, definition] of [['users', 'phone', 'VARCHAR(16) NULL UNIQUE']]) {
+      for (const [table, column, definition] of [
+        ['users', 'phone', 'VARCHAR(16) NULL UNIQUE'],
+        // Existing accounts count as confirmed; sign-up stores 0 for new ones.
+        ['users', 'email_verified', 'TINYINT NOT NULL DEFAULT 1'],
+      ]) {
         const [rows] = await conn.query(`SHOW COLUMNS FROM ${table} LIKE ?`, [column]);
         if (!rows.length) await conn.query(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
       }

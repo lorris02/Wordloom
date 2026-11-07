@@ -4,11 +4,14 @@ const SESSION = '__Host-wordloom-session';
 const SESSION_SECONDS = 60 * 60 * 24 * 14;
 const PASSWORD_ITERATIONS = 600_000;
 export class ApiError extends Error {
-  constructor(status, message) {
+  constructor(status, message, code) {
     super(message);
     this.status = status;
+    this.code = code;
   }
 }
+const CONFIRM_MS = 48 * 3600000;
+const emailReady = env => Boolean(env.RESEND_API_KEY && env.EMAIL_FROM);
 export const json = (value, status = 200, extra = {}) =>
   new Response(JSON.stringify(value), {
     status,
@@ -67,21 +70,53 @@ async function freeUsername(db, email) {
   }
   throw new ApiError(409, 'Could not create that account. Please try again.');
 }
-async function sendReset(env, email, link) {
-  if (!env.RESEND_API_KEY || !env.EMAIL_FROM)
-    throw new ApiError(503, 'Password reset emails are not set up yet.');
+const htmlText = value =>
+  String(value).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+function emailPage(heading, text, button, link) {
+  const [h, t, b, l] = [heading, text, button, link].map(htmlText);
+  return `<div style="font-family:Georgia,serif;max-width:480px;margin:auto;padding:24px;color:#1f2a24;background:#fbf7ef">
+<p style="font-size:20px;margin:0 0 16px;color:#2f5d50">wordloom</p><h1 style="font-size:24px;margin:0 0 12px">${h}</h1>
+<p style="font-family:Arial,sans-serif;line-height:1.5;margin:0 0 20px">${t}</p>
+<p><a href="${l}" style="font-family:Arial,sans-serif;background:#2f5d50;color:#fff;padding:12px 18px;border-radius:999px;text-decoration:none;display:inline-block">${b}</a></p>
+<p style="font-family:Arial,sans-serif;font-size:13px;color:#5d6862;line-height:1.5">If the button does not work, open this link:<br>${l}</p>
+<p style="font-family:Arial,sans-serif;font-size:13px;color:#5d6862">If you did not ask for this, you can ignore this email.</p></div>`;
+}
+async function sendEmail(env, email, subject, heading, text, button, link) {
   const response = await fetch('https://api.resend.com/emails', {
     method: 'POST',
     headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
       from: env.EMAIL_FROM,
       to: [email],
-      subject: 'Reset your Wordloom password',
-      text: `Reset your Wordloom password: ${link}\n\nThis link expires in 30 minutes. If you did not ask for it, you can ignore this email.`,
+      subject,
+      text: `${heading}\n\n${text}\n\n${button}: ${link}\n\nIf you did not ask for this, you can ignore this email.`,
+      html: emailPage(heading, text, button, link),
     }),
+    signal: AbortSignal.timeout(10000),
   });
-  if (!response.ok)
-    throw new ApiError(502, 'We could not send the reset email. Check the address and try again.');
+  if (!response.ok) throw new ApiError(502, 'We could not send the email. Check the address and try again.');
+}
+const sendReset = (env, email, link) =>
+  sendEmail(env, email, 'Reset your Wordloom password', 'Choose a new password',
+    'Someone asked to reset the password for this Wordloom account. The link works for 30 minutes and only once.',
+    'Choose a new password', link);
+// Sends a fresh confirmation link and drops older ones. Returns whether the email went out.
+async function sendConfirmation(db, env, origin, user) {
+  const token = random();
+  await db.prepare('DELETE FROM email_confirmations WHERE user_id=?').bind(user.id).run();
+  await db
+    .prepare('INSERT INTO email_confirmations(token_hash,user_id,expires_at) VALUES(?,?,?)')
+    .bind(await digest(token), user.id, Date.now() + CONFIRM_MS)
+    .run();
+  try {
+    await sendEmail(env, user.email, 'Confirm your Wordloom email', 'Confirm your email',
+      'Confirm this address to finish your Wordloom account and keep your words on every device. The link works for 48 hours.',
+      'Confirm email', `${origin}/?confirmEmail=${token}`);
+    return true;
+  } catch (error) {
+    console.error('Confirmation email failed:', error.message);
+    return false;
+  }
 }
 function sameHash(a, b) {
   if (typeof a !== 'string' || typeof b !== 'string' || a.length !== b.length) return false;
@@ -109,6 +144,7 @@ const publicUser = row => ({
   username: row.username,
   name: row.display_name,
   email: row.email || null,
+  emailConfirmed: Boolean(row.email_verified ?? 1),
 });
 
 export async function readJSON(request, max = 262144) {
@@ -213,6 +249,8 @@ export async function accountAPI(request, env) {
     '/api/account/password/login': 'POST',
     '/api/account/password-reset/request': 'POST',
     '/api/account/password-reset/complete': 'POST',
+    '/api/account/confirm/complete': 'POST',
+    '/api/account/confirm/resend': 'POST',
     '/api/account/contact': 'POST',
     '/api/account/logout': 'POST',
     '/api/collection': 'GET, PUT',
@@ -272,14 +310,20 @@ export async function accountAPI(request, env) {
       email = normalizedEmail(body.email);
     if (await db.prepare('SELECT id FROM users WHERE id<>? AND email=?').bind(account.id, email).first())
       throw new ApiError(409, 'That email is already linked to another account.');
+    // A new address needs confirming, unless this server cannot send email.
+    const verified = email === account.email || !emailReady(env) ? account.email_verified : 0;
     try {
-      await db.prepare('UPDATE users SET email=? WHERE id=?').bind(email, account.id).run();
+      await db
+        .prepare('UPDATE users SET email=?,email_verified=? WHERE id=?')
+        .bind(email, verified, account.id)
+        .run();
+      if (!verified) await sendConfirmation(db, env, origin, { id: account.id, email });
     } catch (error) {
       if (String(error.message).includes('UNIQUE'))
         throw new ApiError(409, 'That email is already linked to another account.');
       throw error;
     }
-    return json({ user: publicUser({ ...account, email }) });
+    return json({ user: publicUser({ ...account, email, email_verified: verified }) });
   }
   if (path === '/api/account/password/register') {
     const name = typeof body.name === 'string' ? body.name.trim() : '';
@@ -290,14 +334,16 @@ export async function accountAPI(request, env) {
     if (await db.prepare('SELECT id FROM users WHERE email=?').bind(email).first())
       throw new ApiError(409, 'That email already has an account. Try signing in.');
     const username = await freeUsername(db, email);
-    const user = { id: crypto.randomUUID(), username, display_name: name, email },
+    // Without an email service (local runs), accounts are confirmed straight away.
+    const confirmed = emailReady(env) ? 0 : 1;
+    const user = { id: crypto.randomUUID(), username, display_name: name, email, email_verified: confirmed },
       salt = randomSalt(),
       fresh = await newSession(db, user);
     try {
       await db.batch([
         db
           .prepare(
-            'INSERT INTO users(id,username,display_name,recovery_hash,created_at,email,password_salt,password_hash) VALUES(?,?,?,?,?,?,?,?)',
+            'INSERT INTO users(id,username,display_name,recovery_hash,created_at,email,password_salt,password_hash,email_verified) VALUES(?,?,?,?,?,?,?,?,?)',
           )
           .bind(
             user.id,
@@ -308,18 +354,50 @@ export async function accountAPI(request, env) {
             email,
             salt,
             await passwordHash(body.password, salt, env.PASSWORD_PEPPER || ''),
+            confirmed,
           ),
         db.prepare('INSERT INTO collections(user_id,updated_at) VALUES(?,?)').bind(user.id, Date.now()),
-        fresh.statement,
+        ...(confirmed ? [fresh.statement] : []),
       ]);
     } catch (error) {
       if (String(error.message).includes('UNIQUE'))
         throw new ApiError(409, 'That email already has an account. Try signing in.');
       throw error;
     }
+    if (!confirmed) {
+      const sent = await sendConfirmation(db, env, origin, user);
+      return json({ user: null, confirmEmail: email, emailSent: sent });
+    }
     return json({ user: publicUser(user) }, 200, {
       'Set-Cookie': setCookie(SESSION, fresh.token, SESSION_SECONDS),
     });
+  }
+  if (path === '/api/account/confirm/complete') {
+    const token = typeof body.token === 'string' ? body.token : '';
+    const row = /^[A-Za-z0-9_-]{43}$/.test(token)
+      ? await db
+          .prepare('DELETE FROM email_confirmations WHERE token_hash=? AND expires_at>? RETURNING user_id')
+          .bind(await digest(token), Date.now())
+          .first()
+      : null;
+    if (!row) throw new ApiError(400, 'This confirmation link has expired or was already used. Sign in to get a new one.');
+    await db.prepare('UPDATE users SET email_verified=1 WHERE id=?').bind(row.user_id).run();
+    const user = await db.prepare('SELECT * FROM users WHERE id=?').bind(row.user_id).first();
+    // Opening the link signs this device in, so the person lands in their account.
+    const fresh = await newSession(db, user);
+    await fresh.statement.run();
+    return json({ user: publicUser(user) }, 200, {
+      'Set-Cookie': setCookie(SESSION, fresh.token, SESSION_SECONDS),
+    });
+  }
+  if (path === '/api/account/confirm/resend') {
+    const email = normalizedEmail(typeof body.email === 'string' ? body.email : '');
+    await limit(db, 'confirm-contact:' + (await digest(email)), 3, 3600000);
+    if (emailReady(env)) {
+      const user = await db.prepare('SELECT * FROM users WHERE email=? AND email_verified=0').bind(email).first();
+      if (user) await sendConfirmation(db, env, origin, user);
+    }
+    return json({ ok: true, message: 'If that email needs confirming, a new link is on the way. Check spam too.' });
   }
   if (path === '/api/account/password/login') {
     const identifier = typeof body.identifier === 'string' ? body.identifier.trim().toLowerCase() : '';
@@ -334,6 +412,9 @@ export async function accountAPI(request, env) {
       actual = await passwordHash(body.password, salt, env.PASSWORD_PEPPER || '');
     if (!user?.password_hash || !sameHash(actual, user.password_hash))
       throw new ApiError(401, 'Email or password is incorrect.');
+    // Reached only with the right password, so it reveals nothing to someone guessing emails.
+    if (!user.email_verified)
+      throw new ApiError(403, 'Confirm your email first. We sent you a link when you signed up.', 'unconfirmed');
     const fresh = await newSession(db, user);
     await db
       .prepare('INSERT INTO sessions(token_hash,user_id,expires_at) VALUES(?,?,?)')
@@ -381,7 +462,7 @@ export async function accountAPI(request, env) {
     const salt = randomSalt(),
       hash = await passwordHash(body.password, salt, env.PASSWORD_PEPPER || '');
     await db.batch([
-      db.prepare('UPDATE users SET password_salt=?,password_hash=? WHERE id=?').bind(salt, hash, row.user_id),
+      db.prepare('UPDATE users SET password_salt=?,password_hash=?,email_verified=1 WHERE id=?').bind(salt, hash, row.user_id),
       db.prepare('DELETE FROM sessions WHERE user_id=?').bind(row.user_id),
     ]);
     return json({ ok: true });

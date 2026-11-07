@@ -1251,6 +1251,10 @@ summary {
   font-weight: 600;
 }
 
+#account-error.ok {
+  color: var(--pine-2);
+}
+
 #account-dialog .text-button {
   margin-top: 12px;
 }

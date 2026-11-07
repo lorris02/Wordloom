@@ -79,6 +79,7 @@ export function createApp() {
             error instanceof ApiError
               ? error.message
               : 'Account service is temporarily unavailable. Your words on this device are safe. Try again shortly.',
+          ...(error instanceof ApiError && error.code ? { code: error.code } : {}),
         });
       }
       return;
