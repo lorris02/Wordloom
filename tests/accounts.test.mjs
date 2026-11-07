@@ -1,91 +1,275 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {DatabaseSync} from 'node:sqlite';
-import {readFileSync} from 'node:fs';
-import {generateKeyPairSync,sign,createHash,randomBytes} from 'node:crypto';
-import {isoCBOR} from '@simplewebauthn/server/helpers';
-import {createWorker} from '../cloudflare/worker.mjs';
-import {starterWords} from '../public/starter.js';
+import { DatabaseSync } from 'node:sqlite';
+import { readFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { accountAPI, ApiError, json } from '../server/accounts.mjs';
+import { starterWords } from '../public/starter.js';
 
-const origin='https://wordloom.example',rpID='wordloom.example';
-function database(){
-  const sqlite=new DatabaseSync(':memory:');for(const file of ['0001_accounts.sql','0002_password_accounts.sql','0003_contact_password_reset.sql'])sqlite.exec(readFileSync(new URL('../cloudflare/migrations/'+file,import.meta.url),'utf8'));
-  const db={prepare(sql){const statement=sqlite.prepare(sql);let args=[];return {bind(...values){args=values;return this;},async first(){return statement.get(...args)||null;},async all(){return {results:statement.all(...args)};},async run(){return {meta:statement.run(...args)};}};},async batch(statements){sqlite.exec('BEGIN');try{const results=[];for(const statement of statements)results.push(await statement.run());sqlite.exec('COMMIT');return results;}catch(error){sqlite.exec('ROLLBACK');throw error;}}};
-  return {db,sqlite};
+const origin = 'https://wordloom.example';
+function database() {
+  const sqlite = new DatabaseSync(':memory:');
+  for (const file of ['0001_accounts.sql', '0002_password_accounts.sql', '0003_contact_password_reset.sql'])
+    sqlite.exec(readFileSync(new URL('../server/migrations/' + file, import.meta.url), 'utf8'));
+  const db = {
+    prepare(sql) {
+      const statement = sqlite.prepare(sql);
+      let args = [];
+      return {
+        bind(...values) {
+          args = values;
+          return this;
+        },
+        async first() {
+          return statement.get(...args) || null;
+        },
+        async all() {
+          return { results: statement.all(...args) };
+        },
+        async run() {
+          return { meta: statement.run(...args) };
+        },
+      };
+    },
+    async batch(statements) {
+      sqlite.exec('BEGIN');
+      try {
+        const results = [];
+        for (const statement of statements) results.push(await statement.run());
+        sqlite.exec('COMMIT');
+        return results;
+      } catch (error) {
+        sqlite.exec('ROLLBACK');
+        throw error;
+      }
+    },
+  };
+  return { db, sqlite };
 }
-function fixture(t){const {db,sqlite}=database();t.after(()=>sqlite.close());const worker=createWorker({}),jar=new Map();return {db,sqlite,jar,async call(path,body,method=body===undefined?'GET':'POST',extra={}){const headers={'Origin':origin,'CF-Connecting-IP':'192.0.2.1','Cookie':[...jar].map(([k,v])=>k+'='+v).join('; '),...extra};if(body!==undefined)headers['Content-Type']='application/json';const response=await worker.fetch(new Request(origin+'/api/'+path,{method,headers,body:body===undefined?undefined:JSON.stringify(body)}),{DB:db,APP_ORIGIN:origin,PASSWORD_PEPPER:'test-only-pepper',RESEND_API_KEY:'test-key',EMAIL_FROM:'Wordloom <no-reply@example.com>'});for(const cookie of response.headers.getSetCookie()){const [k,v]=cookie.split(';')[0].split('=');if(v)jar.set(k,v);else jar.delete(k);}return {response,value:await response.json()};}};}
-const b64=value=>Buffer.from(value).toString('base64url');
-test('username/password registration and username or email sign-in',async t=>{
-  const f=fixture(t),created=await f.call('account/password/register',{username:'wordfan',name:'Word Fan',email:'  WORD@EXAMPLE.COM ',password:'long secure test phrase'});
-  assert.equal(created.response.status,200,JSON.stringify(created.value));assert.equal(created.value.user.username,'wordfan');assert.equal('recoveryCode' in created.value,false);
-  const row=f.sqlite.prepare('SELECT email,password_salt,password_hash,recovery_hash FROM users').get();assert.equal(row.email,'word@example.com');assert.notEqual(row.password_hash,'long secure test phrase');assert.equal(row.password_salt.length,22);
-  await f.call('account/logout',{});
-  assert.equal((await f.call('account/password/login',{identifier:'WORD@EXAMPLE.COM',password:'long secure test phrase'})).response.status,200);
-  await f.call('account/logout',{});
-  assert.equal((await f.call('account/password/login',{identifier:'wordfan',password:'wrong password here'})).response.status,401);
-  assert.equal((await f.call('account/password/register',{username:'wordfan',name:'Other',email:'other@example.com',password:'another secure phrase'})).response.status,409);
-  assert.equal((await f.call('account/password/register',{username:'short',name:'Short',password:'tiny'})).response.status,400);
-  assert.equal((await f.call('account/password/register',{username:'nocontact',name:'No Contact',password:'long secure test phrase'})).response.status,400);
-});
-test('signed-in user can add a phone recovery contact and use it to sign in',async t=>{
-  const f=fixture(t);await f.call('account/password/register',{username:'phoneuser',name:'Phone User',email:'phone@example.com',password:'long secure test phrase'});
-  const updated=await f.call('account/contact',{email:'',phone:'+14155550123'});assert.equal(updated.response.status,200);assert.equal(updated.value.user.phone,'+14155550123');
-  await f.call('account/logout',{});
-  assert.equal((await f.call('account/password/login',{identifier:'+14155550123',password:'long secure test phrase'})).response.status,200);
-});
-function authenticator(){
-  const {publicKey,privateKey}=generateKeyPairSync('ec',{namedCurve:'prime256v1'}),jwk=publicKey.export({format:'jwk'}),id=randomBytes(32),hash=createHash('sha256').update(rpID).digest();
-  const cose=isoCBOR.encode(new Map([[1,2],[3,-7],[-1,1],[-2,new Uint8Array(Buffer.from(jwk.x,'base64url'))],[-3,new Uint8Array(Buffer.from(jwk.y,'base64url'))]]));
-  return {id:b64(id),register(options,{badOrigin=false,verified=true}={}){this.userHandle=options.user.id;const client=Buffer.from(JSON.stringify({type:'webauthn.create',challenge:options.challenge,origin:badOrigin?'https://evil.example':origin,crossOrigin:false}));const authData=Buffer.concat([hash,Buffer.from([verified?0x45:0x41]),Buffer.alloc(4),Buffer.alloc(16),Buffer.from([0,id.length]),id,cose]);return {id:b64(id),rawId:b64(id),type:'public-key',response:{clientDataJSON:b64(client),attestationObject:b64(isoCBOR.encode(new Map([['fmt','none'],['authData',new Uint8Array(authData)],['attStmt',new Map()]]))),transports:['internal']},clientExtensionResults:{}};},login(options,{counter=1,tamper=false}={}){const client=Buffer.from(JSON.stringify({type:'webauthn.get',challenge:options.challenge,origin,crossOrigin:false})),count=Buffer.alloc(4);count.writeUInt32BE(counter);const authData=Buffer.concat([hash,Buffer.from([0x05]),count]),signed=Buffer.concat([authData,createHash('sha256').update(client).digest()]);const signature=sign('sha256',signed,privateKey);if(tamper)signature[signature.length-1]^=1;return {id:b64(id),rawId:b64(id),type:'public-key',response:{clientDataJSON:b64(client),authenticatorData:b64(authData),signature:b64(signature),userHandle:this.userHandle},clientExtensionResults:{}};}};
+function fixture(t) {
+  const { db, sqlite } = database();
+  t.after(() => sqlite.close());
+  const jar = new Map();
+  return {
+    db,
+    sqlite,
+    jar,
+    async call(path, body, method = body === undefined ? 'GET' : 'POST', extra = {}) {
+      const headers = {
+        Origin: origin,
+        'X-Client-IP': '192.0.2.1',
+        Cookie: [...jar].map(([k, v]) => k + '=' + v).join('; '),
+        ...extra,
+      };
+      if (body !== undefined) headers['Content-Type'] = 'application/json';
+      const request = new Request(origin + '/api/' + path, {
+        method,
+        headers,
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+      let response;
+      try {
+        response = await accountAPI(request, {
+          DB: db,
+          APP_ORIGIN: origin,
+          PASSWORD_PEPPER: pepper,
+          RESEND_API_KEY: 'test-key',
+          EMAIL_FROM: 'Wordloom <no-reply@example.com>',
+        });
+      } catch (error) {
+        if (!(error instanceof ApiError)) throw error;
+        response = json({ error: error.message }, error.status);
+      }
+      for (const cookie of response.headers.getSetCookie()) {
+        const [k, v] = cookie.split(';')[0].split('=');
+        if (v) jar.set(k, v);
+        else jar.delete(k);
+      }
+      return { response, value: await response.json() };
+    },
+  };
 }
-async function signup(f,username='learner',auth=authenticator()) {const options=await f.call('account/register/options',{name:'Learner',username,email:`${username}@example.com`});assert.equal(options.response.status,200,JSON.stringify(options.value));const result=await f.call('account/register/verify',{credential:auth.register(options.value.options)});assert.equal(result.response.status,200,JSON.stringify(result.value));return {...result.value,auth};}
-
-test('real passkey registration, signed login, logout, and replay protection',async t=>{
-  const f=fixture(t),registered=await signup(f);
-  assert.equal('recoveryCode' in registered,false);assert.match(f.jar.get('__Host-wordloom-session'),/^[\w-]{43}$/);
-  assert.equal((await f.call('account/me')).value.user.username,'learner');
-  const row=f.sqlite.prepare('SELECT * FROM users').get();assert.equal(typeof row.recovery_hash,'string');
-  assert.equal((await f.call('account/logout',{})).response.status,200);assert.equal((await f.call('collection')).response.status,401);
-  const options=await f.call('account/login/options',{}),credential=registered.auth.login(options.value.options);
-  const result=await f.call('account/login/verify',{credential});assert.equal(result.response.status,200,JSON.stringify(result.value));
-  assert.match(result.response.headers.get('Set-Cookie'),/HttpOnly; Secure; SameSite=Lax/);
-  assert.equal((await f.call('account/login/verify',{credential})).response.status,400);
-  f.sqlite.prepare('UPDATE sessions SET expires_at=0').run();assert.equal((await f.call('collection')).response.status,401);
+const pepper = randomUUID();
+const password = randomUUID();
+const newPassword = randomUUID();
+const otherPassword = randomUUID();
+const wrongPassword = randomUUID();
+const signup = (f, name = 'learner') =>
+  f.call('account/password/register', { name, email: `${name}@example.com`, password });
+test('sign up with name, email and password, then sign in by email or username', async t => {
+  const f = fixture(t),
+    created = await f.call('account/password/register', {
+      name: 'Word Fan',
+      email: '  WORD@EXAMPLE.COM ',
+      password,
+    });
+  assert.equal(created.response.status, 200, JSON.stringify(created.value));
+  assert.equal(created.value.user.email, 'word@example.com');
+  assert.equal(created.value.user.username, 'word');
+  assert.match(created.response.headers.get('Set-Cookie'), /HttpOnly; Secure; SameSite=Lax/);
+  const row = f.sqlite.prepare('SELECT password_salt,password_hash FROM users').get();
+  assert.notEqual(row.password_hash, password);
+  await f.call('account/logout', {});
+  assert.equal((await f.call('collection')).response.status, 401);
+  assert.equal(
+    (await f.call('account/password/login', { identifier: 'WORD@EXAMPLE.COM', password })).response.status,
+    200,
+  );
+  await f.call('account/logout', {});
+  assert.equal(
+    (await f.call('account/password/login', { identifier: 'word', password })).response.status,
+    200,
+  );
+  await f.call('account/logout', {});
+  assert.equal(
+    (
+      await f.call('account/password/login', {
+        identifier: 'word@example.com',
+        password: wrongPassword,
+      })
+    ).response.status,
+    401,
+  );
 });
-test('rejects wrong origin, missing device verification, forged signatures, expired challenges and CSRF',async t=>{
-  const f=fixture(t),auth=authenticator();
-  assert.equal((await f.call('account/register/options',{name:'Learner',username:'learner',email:'learner@example.com'},'POST',{Origin:'https://evil.example'})).response.status,403);
-  for(const bad of [{badOrigin:true},{verified:false}]){const options=await f.call('account/register/options',{name:'Learner',username:'learner',email:'learner@example.com'});assert.equal((await f.call('account/register/verify',{credential:auth.register(options.value.options,bad)})).response.status,400);}
-  assert.equal(f.sqlite.prepare('SELECT count(*) AS n FROM users').get().n,0);
-  const user=await signup(f,'learner',auth);await f.call('account/logout',{});
-  let options=await f.call('account/login/options',{});assert.equal((await f.call('account/login/verify',{credential:user.auth.login(options.value.options,{tamper:true})})).response.status,400);
-  options=await f.call('account/login/options',{});f.sqlite.prepare('UPDATE challenges SET expires_at=0').run();assert.equal((await f.call('account/login/verify',{credential:user.auth.login(options.value.options)})).response.status,400);
+test('sign-up rejects bad input and repeated emails', async t => {
+  const f = fixture(t);
+  await signup(f, 'taken');
+  await f.call('account/logout', {});
+  assert.equal(
+    (await f.call('account/password/register', { name: 'Copy', email: 'taken@example.com', password }))
+      .response.status,
+    409,
+  );
+  assert.equal(
+    (await f.call('account/password/register', { name: '', email: 'a@example.com', password })).response
+      .status,
+    400,
+  );
+  assert.equal(
+    (await f.call('account/password/register', { name: 'A', email: 'not-an-email', password })).response
+      .status,
+    400,
+  );
+  assert.equal(
+    (await f.call('account/password/register', { name: 'A', email: 'a@example.com', password: randomUUID().slice(0, 5) }))
+      .response.status,
+    400,
+  );
+  assert.equal(
+    (await f.call('account/password/register', { name: 'A', email: 'a@example.com', password: randomUUID().slice(0, 8) }))
+      .response.status,
+    200,
+  );
 });
-test('collections are account-isolated, validated and protected from stale overwrites',async t=>{
-  const f=fixture(t);await signup(f,'first');
-  const data={words:[structuredClone(starterWords[0])],history:[]};
-  assert.equal((await f.call('collection',{data,revision:0},'PUT')).value.revision,1);
-  assert.equal((await f.call('collection',{data:{words:[],history:[]},revision:0},'PUT')).response.status,409);
-  assert.equal((await f.call('collection')).value.data.words.length,1);
-  assert.equal((await f.call('collection',{data:{words:[{word:'invalid'}],history:[]},revision:1},'PUT')).response.status,400);
-  await f.call('account/logout',{});await signup(f,'second');assert.equal((await f.call('collection')).value.data.words.length,0);
-  assert.equal((await f.call('collection',{data,revision:0,user_id:'first'},'PUT')).value.revision,1);
-  assert.equal(f.sqlite.prepare('SELECT count(*) AS n FROM collections WHERE revision=1').get().n,2);
+test('two emails with the same start get different usernames', async t => {
+  const f = fixture(t);
+  const first = await f.call('account/password/register', { name: 'A', email: 'sam@one.example', password });
+  await f.call('account/logout', {});
+  const second = await f.call('account/password/register', { name: 'B', email: 'sam@two.example', password });
+  assert.equal(first.value.user.username, 'sam');
+  assert.notEqual(second.value.user.username, 'sam');
 });
-test('email password reset is one-time, expires, and revokes active sessions',async t=>{
-  const f=fixture(t),user=await f.call('account/password/register',{username:'resetuser',name:'Reset User',email:'reset@example.com',password:'long secure test phrase'}),oldSession=f.jar.get('__Host-wordloom-session');
-  const originalFetch=globalThis.fetch;let sent;
-  globalThis.fetch=async(_url,options)=>{sent=JSON.parse(options.body);return new Response('{}',{status:200});};
+test('requests from another site and removed passkey routes are refused', async t => {
+  const f = fixture(t);
+  assert.equal(
+    (
+      await f.call('account/password/register', { name: 'A', email: 'a@example.com', password }, 'POST', {
+        Origin: 'https://evil.example',
+      })
+    ).response.status,
+    403,
+  );
+  assert.equal((await f.call('account/login/options', {})).response.status, 404);
+  assert.equal((await f.call('account/passkey/options', {})).response.status, 404);
+});
+test('signed-in user can change their email', async t => {
+  const f = fixture(t);
+  await signup(f);
+  const updated = await f.call('account/contact', { email: 'new@example.com' });
+  assert.equal(updated.value.user.email, 'new@example.com');
+  await f.call('account/logout', {});
+  assert.equal(
+    (await f.call('account/password/login', { identifier: 'new@example.com', password })).response.status,
+    200,
+  );
+});
+test('collections are account-isolated, validated and protected from stale overwrites', async t => {
+  const f = fixture(t);
+  await signup(f, 'first');
+  const data = { words: [structuredClone(starterWords[0])], history: [] };
+  assert.equal((await f.call('collection', { data, revision: 0 }, 'PUT')).value.revision, 1);
+  assert.equal(
+    (await f.call('collection', { data: { words: [], history: [] }, revision: 0 }, 'PUT')).response.status,
+    409,
+  );
+  assert.equal((await f.call('collection')).value.data.words.length, 1);
+  assert.equal(
+    (await f.call('collection', { data: { words: [{ word: 'invalid' }], history: [] }, revision: 1 }, 'PUT'))
+      .response.status,
+    400,
+  );
+  await f.call('account/logout', {});
+  await signup(f, 'second');
+  assert.equal((await f.call('collection')).value.data.words.length, 0);
+  assert.equal(
+    (await f.call('collection', { data, revision: 0, user_id: 'first' }, 'PUT')).value.revision,
+    1,
+  );
+  assert.equal(f.sqlite.prepare('SELECT count(*) AS n FROM collections WHERE revision=1').get().n, 2);
+});
+test('email password reset is one-time, expires, and revokes active sessions', async t => {
+  const f = fixture(t),
+    user = await f.call('account/password/register', {
+      name: 'Reset User',
+      email: 'reset@example.com',
+      password,
+    }),
+    oldSession = f.jar.get('__Host-wordloom-session');
+  const originalFetch = globalThis.fetch;
+  let sent;
+  globalThis.fetch = async (_url, options) => {
+    sent = JSON.parse(options.body);
+    return new Response('{}', { status: 200 });
+  };
   try {
-    const requested=await f.call('account/password-reset/request',{contact:'reset@example.com'});assert.equal(requested.response.status,200);assert.equal(requested.value.ok,true);
-    const link=sent.text.match(/https:\/\/wordloom\.example\/\?passwordReset=([A-Za-z0-9_-]{43})/);assert.ok(link);
-    const token=link[1];assert.equal((await f.call('account/password-reset/complete',{token,password:'a different secure phrase'})).response.status,200);
-    assert.equal((await f.call('account/me',undefined,'GET',{Cookie:'__Host-wordloom-session='+oldSession})).value.user,null);
-    await f.call('account/logout',{});
-    assert.equal((await f.call('account/password/login',{identifier:'resetuser',password:'a different secure phrase'})).response.status,200);
-    assert.equal((await f.call('account/password-reset/complete',{token,password:'another new password phrase'})).response.status,400);
-    assert.equal((await f.call('account/password-reset/request',{contact:'missing@example.com'})).response.status,200);
-  } finally {globalThis.fetch=originalFetch;}
-  assert.equal(f.sqlite.prepare('SELECT count(*) AS n FROM users').get().n,1);
-  assert.equal('user' in user.value,true);
+    const requested = await f.call('account/password-reset/request', { email: 'reset@example.com' });
+    assert.equal(requested.response.status, 200);
+    assert.equal(requested.value.ok, true);
+    const link = sent.text.match(/https:\/\/wordloom\.example\/\?passwordReset=([A-Za-z0-9_-]{43})/);
+    assert.ok(link);
+    const token = link[1];
+    assert.equal(
+      (await f.call('account/password-reset/complete', { token, password: newPassword }))
+        .response.status,
+      200,
+    );
+    assert.equal(
+      (await f.call('account/me', undefined, 'GET', { Cookie: '__Host-wordloom-session=' + oldSession }))
+        .value.user,
+      null,
+    );
+    await f.call('account/logout', {});
+    assert.equal(
+      (
+        await f.call('account/password/login', {
+          identifier: 'reset@example.com',
+          password: newPassword,
+        })
+      ).response.status,
+      200,
+    );
+    assert.equal(
+      (await f.call('account/password-reset/complete', { token, password: otherPassword }))
+        .response.status,
+      400,
+    );
+    assert.equal(
+      (await f.call('account/password-reset/request', { email: 'missing@example.com' })).response.status,
+      200,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(f.sqlite.prepare('SELECT count(*) AS n FROM users').get().n, 1);
+  assert.equal('user' in user.value, true);
 });
