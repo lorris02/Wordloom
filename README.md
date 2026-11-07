@@ -24,7 +24,7 @@ Wordloom helps learners collect unfamiliar English words, practice them through 
 | Frontend | JavaScript, HTML, CSS |
 | Backend | Node.js |
 | Database | MySQL, mysql2 |
-| Authentication | Email and password accounts with hashed passwords and secure sessions |
+| Authentication | Email and password accounts with email confirmation, password reset, hashed passwords and secure sessions |
 | Vocabulary services | Free Dictionary API, Datamuse |
 | Optional integrations | OpenAI, Resend |
 | Testing | Node.js test runner, GitHub Actions |
@@ -88,13 +88,13 @@ Keep `.env` files, database credentials, and API keys out of Git. A committed `.
 
 Offline account changes retry while the page is open. If concurrent updates conflict, Wordloom asks which version to keep rather than silently merging them.
 
-Accounts use a name, email, and password. The email is used for sign-in and password resets.
+Accounts use a name, email, and password. New accounts confirm their email with a link before they can sign in; opening the link signs that device in. Changing the email asks for a new confirmation. The email is also used for password resets. When email delivery is not configured (for example, locally), new accounts are confirmed straight away.
 
 ### Optional Services
 
 | Service | Environment variables | Purpose |
 |---|---|---|
-| Email recovery | `RESEND_API_KEY`, `EMAIL_FROM` | Deliver password-reset emails |
+| Email | `RESEND_API_KEY`, `EMAIL_FROM` | Deliver confirmation and password-reset emails through [Resend](https://resend.com) |
 | AI feedback | `OPENAI_API_KEY`, optional `OPENAI_MODEL` | Provide feedback on learner-written sentences |
 
 The default AI model is `gpt-4.1-mini`. Before sending a request, the interface asks permission to share the word, definition, and sentence with OpenAI. Feedback can be incorrect and should be reviewed. Configure an API spending limit before enabling this publicly.
