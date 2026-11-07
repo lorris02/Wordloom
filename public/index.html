@@ -1,37 +1,106 @@
 <!doctype html>
 <html lang="en">
-<head>
-  <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="theme-color" content="#242d68">
-  <meta name="description" content="Collect new words. Practice in context. Come back at the right time. Wordloom helps you build a vocabulary that stays with you.">
-  <title>Wordloom — make words yours</title>
-  <link rel="icon" href="./icon.svg" type="image/svg+xml"><link rel="stylesheet" href="./style.css">
-</head>
-<body>
-  <div class="shell">
-    <aside class="sidebar">
-      <a href="#today" class="brand" aria-label="Wordloom home"><span class="brand-mark">w</span>wordloom<span class="brand-dot">✳</span></a>
-      <div class="side-caption">A little practice. A bigger vocabulary.</div>
-      <nav aria-label="Main navigation">
-        <button class="nav active" data-view="today"><span>◷</span> Today <span class="nav-count" id="due-count">0</span></button>
-        <button class="nav" data-view="collection"><span>▤</span> My words</button>
-        <button class="nav" data-view="practice"><span>✳</span> Practice studio</button>
-        <button class="nav" data-view="progress"><span>↗</span> My progress</button>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+    <meta name="theme-color" content="#10392c" />
+    <meta
+      name="description"
+      content="Collect new words. Practice in context. Come back at the right time. Wordloom helps you build a vocabulary that stays with you."
+    />
+    <title>Wordloom — make words yours</title>
+    <link rel="icon" href="./icon.svg" type="image/svg+xml" />
+    <link rel="preload" href="./fonts/fraunces.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <div class="weave" aria-hidden="true"></div>
+    <header class="masthead">
+      <a href="#today" class="brand" aria-label="Wordloom home">
+        <img src="./icon.svg" alt="" width="36" height="36" />Wordloom
+      </a>
+      <nav class="tabs" aria-label="Main navigation">
+        <button class="nav active" data-view="today">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="8.5" />
+            <path d="M12 7v5l3.5 2" />
+          </svg>
+          <span>Today</span><span class="nav-count" id="due-count">0</span>
+        </button>
+        <button class="nav" data-view="collection">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M5 4.5h14v15H5zM9 4.5v15M12.5 9H16M12.5 13H16" />
+          </svg>
+          <span>Words</span>
+        </button>
+        <button class="nav" data-view="practice">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h16M4 16h16M8 4v16M16 4v16" /></svg>
+          <span>Practice</span>
+        </button>
+        <button class="nav" data-view="progress">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 20V13M10 20V8M16 20v-9M21 20H3M16 5l3-2" />
+          </svg>
+          <span>Progress</span>
+        </button>
       </nav>
-      <div class="side-bottom"><div class="small-flower" aria-hidden="true">✳</div><p>Make room for<br>something new.</p><button class="text-button" id="export">Export my words</button><button type="button" class="text-button" id="import-backup">Import a backup</button><input type="file" id="import" accept="application/json,.json" hidden><p class="storage-note" id="storage-note">Saved in this browser.<br>No account needed.</p></div>
-    </aside>
-    <div class="main-wrap">
-      <header class="topbar"><div class="topbar-info"><span id="date-label"></span><span id="sync-status" role="status" aria-live="polite" hidden></span></div><div class="topbar-actions"><button class="button secondary compact" id="account-open">Sign in</button><button class="button primary compact" id="add-top">＋ Add words</button></div></header>
-      <main id="main" tabindex="-1"></main>
-      <footer>Wordloom <span>One word at a time.</span><a href="https://dictionaryapi.dev/" target="_blank" rel="noreferrer">Dictionary source</a></footer>
+      <div class="masthead-actions">
+        <button class="button quiet compact" id="account-open">Sign in</button>
+        <button class="button primary compact" id="add-top">
+          <span aria-hidden="true">+</span> Add words
+        </button>
+      </div>
+    </header>
+    <div class="dateline">
+      <span id="date-label"></span><span id="sync-status" role="status" aria-live="polite" hidden></span>
     </div>
-  </div>
-  <dialog id="add-dialog" aria-labelledby="add-title">
-    <form id="add-form"><div class="dialog-heading"><h2 id="add-title">What caught your eye?</h2><button type="button" class="icon-button" id="close-add" aria-label="Close add words">×</button></div><p>Enter a word, or a few separated by commas. We’ll look up their meanings.</p><label for="new-words">Words to learn</label><textarea id="new-words" placeholder="serendipity, articulate, resilient" required maxlength="400" rows="3"></textarea><p class="hint">Up to 10 English words at a time. Words are sent to the dictionary service for lookup.</p><details><summary>Add a word with your own meaning</summary><label for="custom-definition">Your meaning (for a single word)</label><textarea id="custom-definition" rows="2" maxlength="1000" placeholder="A definition in your own words"></textarea><label for="custom-example">Example sentence (optional)</label><input id="custom-example" maxlength="1000" placeholder="Use the word in a sentence"></details><div id="add-status" role="status" aria-live="polite"></div><button class="button primary" id="save-words" type="submit">Add to my words</button></form>
-  </dialog>
-  <dialog id="account-dialog" aria-label="Wordloom account"></dialog>
-  <div id="toast" role="status" aria-live="polite"></div>
-  <script type="module" src="./app.js"></script>
-</body>
+    <main id="main" tabindex="-1"></main>
+    <footer>
+      <div class="footer-brand">
+        <strong>Wordloom</strong>
+        <p id="storage-note">Saved in this browser. No account needed.</p>
+      </div>
+      <div class="footer-links">
+        <button class="text-button" id="export">Export my words</button>
+        <button type="button" class="text-button" id="import-backup">Import a backup</button>
+        <input type="file" id="import" accept="application/json,.json" hidden />
+        <a href="https://dictionaryapi.dev/" target="_blank" rel="noreferrer">Dictionary source</a>
+      </div>
+    </footer>
+    <dialog id="add-dialog" aria-labelledby="add-title">
+      <form id="add-form">
+        <div class="dialog-heading">
+          <h2 id="add-title">What caught your eye?</h2>
+          <button type="button" class="icon-button" id="close-add" aria-label="Close add words">×</button>
+        </div>
+        <p>Enter a word, or a few separated by commas. We’ll look up their meanings.</p>
+        <label for="new-words">Words to learn</label>
+        <textarea
+          id="new-words"
+          placeholder="serendipity, articulate, resilient"
+          required
+          maxlength="400"
+          rows="3"
+        ></textarea>
+        <p class="hint">Up to 10 English words at a time.</p>
+        <details>
+          <summary>Add a word with your own meaning</summary>
+          <label for="custom-definition">Your meaning (for a single word)</label>
+          <textarea
+            id="custom-definition"
+            rows="2"
+            maxlength="1000"
+            placeholder="A definition in your own words"
+          ></textarea>
+          <label for="custom-example">Example sentence (optional)</label>
+          <input id="custom-example" maxlength="1000" placeholder="Use the word in a sentence" />
+        </details>
+        <div id="add-status" role="status" aria-live="polite"></div>
+        <button class="button primary wide" id="save-words" type="submit">Add to my words</button>
+      </form>
+    </dialog>
+    <dialog id="account-dialog" aria-label="Wordloom account"></dialog>
+    <div id="toast" role="status" aria-live="polite"></div>
+    <script type="module" src="./app.js"></script>
+  </body>
 </html>
-
